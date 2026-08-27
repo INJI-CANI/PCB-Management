@@ -99,6 +99,7 @@ function handleSupabaseError(error, actionLabel) {
    포맷 / 공용 유틸
    ========================================================================= */
 const CURRENCY_SYMBOL = { KRW: "₩", USD: "$" };
+const ALIGN_CLASS = { left: "text-left", center: "text-center", right: "text-right" };
 
 function formatPrice(value, currency) {
   if (value === null || value === undefined || value === "") return "-";
@@ -866,10 +867,10 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
         <div className="overflow-x-auto">
           <table className="w-full min-w-[980px] text-sm">
             <thead>
-              <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
+              <tr className="border-b border-slate-800 bg-slate-800/50 text-xs font-medium uppercase tracking-wide text-slate-400">
                 {columns.map((c) => (
-                  <th key={c} className="px-4 py-3">
-                    {c}
+                  <th key={c.label} className={`px-4 py-3 ${ALIGN_CLASS[c.align] || "text-left"}`}>
+                    {c.label}
                   </th>
                 ))}
               </tr>
@@ -939,7 +940,12 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
 
   return (
     <GroupedHistoryTable
-      columns={["제조사", "수주일", "수량", "작업"]}
+      columns={[
+        { label: "제조사", align: "left" },
+        { label: "수주일", align: "center" },
+        { label: "수량", align: "right" },
+        { label: "작업", align: "center" },
+      ]}
       rows={rows}
       dateField="order_date"
       productLookup={productLookup}
@@ -956,10 +962,10 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 text-slate-400">{r.manufacturer || "-"}</td>
-          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.order_date)}</td>
+          <td className="px-4 py-3 text-left text-slate-400">{r.manufacturer || "-"}</td>
+          <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.order_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
-          <td className="px-4 py-3">
+          <td className="px-4 py-3 text-center">
             <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
           </td>
         </tr>
@@ -973,14 +979,21 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
     const ok = await deleteRecord(
       "shipments",
       row.id,
-      `${row.customer} / ${row.model_name} 출고 내역을 삭제할까요?`
+      `${row.customer} / ${row.model_name} 출고 내역을 삭제할까요?\n(이 출고에서 자동 기록된 단가 이력도 함께 삭제됩니다)`
     );
     if (ok) onRefresh();
   };
 
   return (
     <GroupedHistoryTable
-      columns={["제조사", "출고일", "수량", "매입가", "판매가", "작업"]}
+      columns={[
+        { label: "제조사", align: "left" },
+        { label: "출고일", align: "center" },
+        { label: "수량", align: "right" },
+        { label: "매입가", align: "right" },
+        { label: "판매가", align: "right" },
+        { label: "작업", align: "center" },
+      ]}
       rows={rows}
       dateField="shipment_date"
       productLookup={productLookup}
@@ -1001,12 +1014,12 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 text-slate-400">{r.manufacturer || "-"}</td>
-          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
+          <td className="px-4 py-3 text-left text-slate-400">{r.manufacturer || "-"}</td>
+          <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.sale_price, r.sale_currency)}</td>
-          <td className="px-4 py-3">
+          <td className="px-4 py-3 text-center">
             <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
           </td>
         </tr>
@@ -1040,10 +1053,10 @@ function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
 
   return (
     <tr className="hover:bg-slate-800/40">
-      <td className="px-4 py-3 text-slate-400">{row.material_maker || "-"}</td>
-      <td className="px-4 py-3 font-mono text-slate-300">{formatDate(row.order_date)}</td>
+      <td className="px-4 py-3 text-left text-slate-400">{row.material_maker || "-"}</td>
+      <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(row.order_date)}</td>
       <td className="px-4 py-3 text-right font-mono">{formatQty(row.quantity)}</td>
-      <td className="px-4 py-3">
+      <td className="px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1.5">
           <input
             type="number"
@@ -1065,13 +1078,13 @@ function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
         </div>
       </td>
       <td className="px-4 py-3 text-right font-mono text-amber-400">{formatQty(pending)}</td>
-      <td className="px-4 py-3">
+      <td className="px-4 py-3 text-center">
         <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${statusStyle}`}>
           <CircleDot size={10} />
           {row.status}
         </span>
       </td>
-      <td className="px-4 py-3">
+      <td className="px-4 py-3 text-center">
         <RowActions onEdit={() => onEdit(row)} onDelete={() => onDelete(row)} />
       </td>
     </tr>
@@ -1097,7 +1110,15 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
 
   return (
     <GroupedHistoryTable
-      columns={["원자재 Maker", "발주일", "발주수량", "입고수량", "대기수량", "상태", "작업"]}
+      columns={[
+        { label: "원자재 Maker", align: "left" },
+        { label: "발주일", align: "center" },
+        { label: "발주수량", align: "right" },
+        { label: "입고수량", align: "right" },
+        { label: "대기수량", align: "right" },
+        { label: "상태", align: "center" },
+        { label: "작업", align: "center" },
+      ]}
       rows={rows}
       dateField="order_date"
       productLookup={productLookup}
@@ -1130,17 +1151,23 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
 
 function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
-    const ok = await deleteRecord(
-      "price_history",
-      row.id,
-      `${row.customer} / ${row.model_name} 단가 이력을 삭제할까요?`
-    );
+    const message =
+      row.source === "shipment"
+        ? `${row.customer} / ${row.model_name} 단가 이력을 삭제할까요?\n(출고 내역에서 자동 기록된 이력이라, 연결된 출고 내역도 함께 삭제됩니다)`
+        : `${row.customer} / ${row.model_name} 단가 이력을 삭제할까요?`;
+    const ok = await deleteRecord("price_history", row.id, message);
     if (ok) onRefresh();
   };
 
   return (
     <GroupedHistoryTable
-      columns={["적용일", "매입가", "판매가", "등록경로", "작업"]}
+      columns={[
+        { label: "적용일", align: "center" },
+        { label: "매입가", align: "right" },
+        { label: "판매가", align: "right" },
+        { label: "등록경로", align: "center" },
+        { label: "작업", align: "center" },
+      ]}
       rows={rows}
       dateField="effective_date"
       productLookup={productLookup}
@@ -1160,10 +1187,10 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.effective_date)}</td>
+          <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.effective_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.sale_price, r.sale_currency)}</td>
-          <td className="px-4 py-3">
+          <td className="px-4 py-3 text-center">
             <span
               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
                 r.source === "shipment"
@@ -1175,7 +1202,7 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
               {r.source === "shipment" ? "출고 자동기록" : "수동 입력"}
             </span>
           </td>
-          <td className="px-4 py-3">
+          <td className="px-4 py-3 text-center">
             <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
           </td>
         </tr>
@@ -1367,7 +1394,7 @@ function ShipmentModal({ open, onClose, editing }) {
         <input type="date" className={inputClass} value={form.shipment_date} onChange={set("shipment_date")} />
       </Field>
       <p className="mb-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
-        매입가와 판매가는 서로 다른 통화로 입력할 수 있습니다 (예: 매입 USD / 판매 KRW). 저장 시 단가 이력(단가 이력 탭)에 자동으로 기록됩니다.
+        매입가와 판매가는 서로 다른 통화로 입력할 수 있습니다 (예: 매입 USD / 판매 KRW). 신규 등록 시 단가 이력(단가 이력 탭)에 자동 기록되며, 이후 이 출고 내역을 수정하면 연결된 단가 이력도 함께 갱신됩니다.
       </p>
       <div className="mt-2 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
@@ -1656,6 +1683,11 @@ function PriceHistoryModal({ open, onClose, editing }) {
       <Field label="메모 (선택)">
         <input className={inputClass} value={form.memo} onChange={set("memo")} placeholder="예: 원자재 가격 인상으로 인한 조정" />
       </Field>
+      {editing && editing.source === "shipment" && (
+        <p className="mb-2 rounded-md bg-cyan-500/10 p-2.5 text-xs text-cyan-300">
+          이 이력은 출고 내역에서 자동 기록되었습니다. 여기서 수정하면 연결된 출고 내역의 매입가/판매가도 동일하게 갱신되고, 삭제하면 연결된 출고 내역도 함께 삭제됩니다.
+        </p>
+      )}
       <div className="mt-4 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
           취소
