@@ -20,6 +20,8 @@ import {
   ChevronUp,
   Download,
   Check,
+  AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 
 /* =========================================================================
@@ -40,6 +42,58 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* =========================================================================
+   토스트 알림 (성공/실패 피드백) — 저장이 "조용히" 실패하지 않도록 함
+   ========================================================================= */
+let toastListeners = [];
+function notifyToast(type, message) {
+  toastListeners.forEach((l) => l(type, message));
+}
+function useToastState() {
+  const [toast, setToast] = useState(null);
+  useEffect(() => {
+    const listener = (type, message) => setToast({ type, message, key: Date.now() + Math.random() });
+    toastListeners.push(listener);
+    return () => {
+      toastListeners = toastListeners.filter((l) => l !== listener);
+    };
+  }, []);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+  return toast;
+}
+function ToastHost() {
+  const toast = useToastState();
+  if (!toast) return null;
+  const isError = toast.type === "error";
+  return (
+    <div className="fixed bottom-5 right-5 z-[100] max-w-sm">
+      <div
+        className={`flex items-start gap-2 rounded-lg border px-4 py-3 text-sm shadow-2xl ${
+          isError
+            ? "border-red-800 bg-red-950/95 text-red-200"
+            : "border-emerald-800 bg-emerald-950/95 text-emerald-200"
+        }`}
+      >
+        {isError ? <AlertTriangle size={16} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={16} className="mt-0.5 shrink-0" />}
+        <span className="break-words">{toast.message}</span>
+      </div>
+    </div>
+  );
+}
+
+// Supabase 응답의 error를 일관되게 처리: 콘솔 로그 + 토스트 알림
+function handleSupabaseError(error, actionLabel) {
+  if (!error) return false;
+  // eslint-disable-next-line no-console
+  console.error(`[Supabase] ${actionLabel} 실패:`, error);
+  notifyToast("error", `${actionLabel} 실패: ${error.message || "알 수 없는 오류"}`);
+  return true;
+}
 
 /* =========================================================================
    포맷 / 공용 유틸
@@ -71,7 +125,9 @@ async function deleteRecord(table, id, confirmMessage) {
   const ok = window.confirm(confirmMessage || "정말 삭제하시겠습니까? 삭제된 데이터는 복구할 수 없습니다.");
   if (!ok) return false;
   const { error } = await supabase.from(table).delete().eq("id", id);
-  return !error;
+  if (handleSupabaseError(error, "삭제")) return false;
+  notifyToast("success", "삭제되었습니다.");
+  return true;
 }
 
 // 고객사 → 모델명 → (옵션) 최신 날짜순 정렬로 그룹핑
@@ -254,7 +310,7 @@ function RowActions({ onEdit, onDelete }) {
   );
 }
 
-// 고객사 그룹 접기/펼치기 헤더 (아코디언)
+// 1단계: 고객사 그룹 접기/펼치기 헤더
 function GroupHeader({ label, count, collapsed, onToggle }) {
   return (
     <button
@@ -267,6 +323,37 @@ function GroupHeader({ label, count, collapsed, onToggle }) {
         <span className="text-xs font-normal text-slate-500">({count}건)</span>
       </span>
       {collapsed ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronUp size={16} className="text-slate-400" />}
+    </button>
+  );
+}
+
+// 2단계: 모델명 그룹 접기/펼치기 헤더 — 모델명을 굵고 크게 강조 + 핵심 수치(발주잔량/재공/재고) 표시
+function ModelGroupHeader({ label, count, stats, collapsed, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      className="flex w-full items-center justify-between gap-3 border-t border-slate-800/60 bg-slate-900/70 px-4 py-2.5 text-left hover:bg-slate-800/60"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="truncate text-base font-bold text-slate-50 sm:text-lg">{label}</span>
+        {count !== undefined && <span className="shrink-0 text-xs font-normal text-slate-500">({count}건)</span>}
+      </span>
+      <span className="flex shrink-0 items-center gap-3">
+        {stats && (
+          <span className="hidden gap-3 whitespace-nowrap font-mono text-xs text-slate-400 sm:flex">
+            <span>
+              발주잔량 <b className="text-amber-400">{formatQty(stats.order_balance)}</b>
+            </span>
+            <span>
+              재공 <b className="text-cyan-300">{formatQty(stats.wip_qty)}</b>
+            </span>
+            <span>
+              재고 <b className="text-slate-200">{formatQty(stats.product_stock)}</b>
+            </span>
+          </span>
+        )}
+        {collapsed ? <ChevronDown size={15} className="text-slate-400" /> : <ChevronUp size={15} className="text-slate-400" />}
+      </span>
     </button>
   );
 }
@@ -309,7 +396,8 @@ export default function App() {
       .select("*")
       .order("customer", { ascending: true })
       .order("model_name", { ascending: true });
-    if (!error) setDashboardRows(data || []);
+    if (handleSupabaseError(error, "대시보드 조회")) return;
+    setDashboardRows(data || []);
     setLastSync(new Date());
   }, []);
 
@@ -319,7 +407,8 @@ export default function App() {
       .select("*")
       .order("order_date", { ascending: false })
       .order("created_at", { ascending: false });
-    if (!error) setSalesRows(data || []);
+    if (handleSupabaseError(error, "수주 내역 조회")) return;
+    setSalesRows(data || []);
   }, []);
 
   const fetchShipments = useCallback(async () => {
@@ -328,7 +417,8 @@ export default function App() {
       .select("*")
       .order("shipment_date", { ascending: false })
       .order("created_at", { ascending: false });
-    if (!error) setShipmentRows(data || []);
+    if (handleSupabaseError(error, "출고 내역 조회")) return;
+    setShipmentRows(data || []);
   }, []);
 
   const fetchMaterials = useCallback(async () => {
@@ -337,7 +427,8 @@ export default function App() {
       .select("*")
       .order("order_date", { ascending: false })
       .order("created_at", { ascending: false });
-    if (!error) setMaterialRows(data || []);
+    if (handleSupabaseError(error, "원자재 발주 내역 조회")) return;
+    setMaterialRows(data || []);
   }, []);
 
   const fetchPriceHistory = useCallback(async () => {
@@ -346,7 +437,8 @@ export default function App() {
       .select("*")
       .order("effective_date", { ascending: false })
       .order("created_at", { ascending: false });
-    if (!error) setPriceHistoryRows(data || []);
+    if (handleSupabaseError(error, "단가 이력 조회")) return;
+    setPriceHistoryRows(data || []);
   }, []);
 
   const fetchAll = useCallback(async () => {
@@ -412,6 +504,19 @@ export default function App() {
       });
     }
     return Array.from(map.values()).sort((a, b) => a.customer.localeCompare(b.customer, "ko"));
+  }, [dashboardRows]);
+
+  // 고객사+모델명 → 발주잔량/재공/재고 조회용 (모든 내역 테이블에서 모델 헤더 옆에 표시)
+  const productLookup = useMemo(() => {
+    const map = new Map();
+    for (const r of dashboardRows) {
+      map.set(`${r.customer}::${r.model_name}`, {
+        order_balance: r.order_balance,
+        wip_qty: r.wip_qty,
+        product_stock: r.product_stock,
+      });
+    }
+    return map;
   }, [dashboardRows]);
 
   return (
@@ -497,6 +602,7 @@ export default function App() {
         {tab === "sales" && (
           <SalesHistoryTab
             rows={salesRows}
+            productLookup={productLookup}
             onEdit={(row) => openEdit("sales", row)}
             onRefresh={fetchSales}
           />
@@ -504,6 +610,7 @@ export default function App() {
         {tab === "shipment" && (
           <ShipmentHistoryTab
             rows={shipmentRows}
+            productLookup={productLookup}
             onEdit={(row) => openEdit("shipment", row)}
             onRefresh={fetchShipments}
           />
@@ -511,6 +618,7 @@ export default function App() {
         {tab === "material" && (
           <MaterialHistoryTab
             rows={materialRows}
+            productLookup={productLookup}
             onEdit={(row) => openEdit("material", row)}
             onRefresh={fetchMaterials}
           />
@@ -518,6 +626,7 @@ export default function App() {
         {tab === "price_history" && (
           <PriceHistoryTab
             rows={priceHistoryRows}
+            productLookup={productLookup}
             onEdit={(row) => openEdit("price", row)}
             onRefresh={fetchPriceHistory}
           />
@@ -535,23 +644,32 @@ export default function App() {
         products={dashboardRows}
         initial={editingRecord}
       />
+
+      <ToastHost />
     </div>
   );
 }
 
 /* =========================================================================
-   대시보드 탭 (고객사별 그룹 + 접기/펼치기, 모델명 breakdown, 엑셀 내보내기)
+   대시보드 탭 (고객사 → 모델명 2단계 아코디언, 엑셀 내보내기)
    ========================================================================= */
 function DashboardTab({ rows, summary, onEditStock }) {
-  const [collapsed, setCollapsed] = useState(() => new Set());
-  const toggle = (customer) =>
-    setCollapsed((prev) => {
+  const grouped = useMemo(() => groupByCustomerAndModel(rows), [rows]);
+  const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
+  const [collapsedModels, setCollapsedModels] = useState(() => new Set());
+
+  const toggleCustomer = (customer) =>
+    setCollapsedCustomers((prev) => {
       const next = new Set(prev);
       next.has(customer) ? next.delete(customer) : next.add(customer);
       return next;
     });
-
-  const grouped = useMemo(() => groupByCustomerAndModel(rows), [rows]);
+  const toggleModel = (key) =>
+    setCollapsedModels((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
 
   const handleExport = () => {
     exportToExcel("대시보드_현황.xlsx", flattenGrouped(grouped), [
@@ -577,10 +695,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
           </div>
         )}
         {summary.map((s) => (
-          <div
-            key={s.customer}
-            className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm"
-          >
+          <div key={s.customer} className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
             <div className="mb-3 flex items-center gap-2 text-slate-300">
               <Building2 size={16} className="text-cyan-400" />
               <span className="text-sm font-semibold">{s.customer}</span>
@@ -588,35 +703,28 @@ function DashboardTab({ rows, summary, onEditStock }) {
             <div className="grid grid-cols-3 gap-3 text-center">
               <div>
                 <div className="text-[11px] text-slate-500">총 수주량</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-slate-100">
-                  {formatQty(s.totalOrder)}
-                </div>
+                <div className="mt-1 font-mono text-lg font-semibold text-slate-100">{formatQty(s.totalOrder)}</div>
               </div>
               <div>
                 <div className="text-[11px] text-slate-500">납품 완료</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-emerald-400">
-                  {formatQty(s.delivered)}
-                </div>
+                <div className="mt-1 font-mono text-lg font-semibold text-emerald-400">{formatQty(s.delivered)}</div>
               </div>
               <div>
                 <div className="text-[11px] text-slate-500">발주 잔량</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-amber-400">
-                  {formatQty(s.balance)}
-                </div>
+                <div className="mt-1 font-mono text-lg font-semibold text-amber-400">{formatQty(s.balance)}</div>
               </div>
             </div>
 
-            {/* 모델명 breakdown */}
+            {/* 모델명 breakdown (볼드 강조) */}
             <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
               {s.models
                 .slice()
                 .sort((a, b) => a.model_name.localeCompare(b.model_name, "ko"))
                 .map((m) => (
                   <div key={m.model_name} className="flex items-center justify-between gap-2 text-xs">
-                    <span className="truncate font-sans text-slate-300">{m.model_name}</span>
+                    <span className="truncate font-sans text-sm font-bold text-slate-100">{m.model_name}</span>
                     <span className="shrink-0 font-mono text-slate-500">
-                      총 {formatQty(m.totalOrder)} · 완료 {formatQty(m.delivered)} · 잔량{" "}
-                      {formatQty(m.balance)}
+                      총 {formatQty(m.totalOrder)} · 완료 {formatQty(m.delivered)} · 잔량 {formatQty(m.balance)}
                     </span>
                   </div>
                 ))}
@@ -625,7 +733,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
         ))}
       </div>
 
-      {/* 메인 현황 테이블 : 고객사별 그룹 + 접기/펼치기 */}
+      {/* 메인 현황 테이블 : 고객사 → 모델명 2단계 아코디언 */}
       <div>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-300">모델별 실시간 현황</h2>
@@ -636,7 +744,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
             <table className="w-full min-w-[900px] text-sm">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
-                  <th className="px-4 py-3">모델명</th>
+                  <th className="px-4 py-3">구분</th>
                   <th className="px-4 py-3 text-right">총수주량</th>
                   <th className="px-4 py-3 text-right">제품재고</th>
                   <th className="px-4 py-3 text-right">재공</th>
@@ -662,35 +770,56 @@ function DashboardTab({ rows, summary, onEditStock }) {
                           <GroupHeader
                             label={g.customer}
                             count={g.totalRows}
-                            collapsed={collapsed.has(g.customer)}
-                            onToggle={() => toggle(g.customer)}
+                            collapsed={collapsedCustomers.has(g.customer)}
+                            onToggle={() => toggleCustomer(g.customer)}
                           />
                         </td>
                       </tr>
-                      {!collapsed.has(g.customer) &&
-                        g.models.map((m) =>
-                          m.rows.map((r) => (
-                            <tr key={r.id} className="hover:bg-slate-800/40">
-                              <td className="px-4 py-3 font-sans font-medium text-slate-100">{r.model_name}</td>
-                              <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
-                              <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
-                              <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
-                              <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
-                              <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
-                              <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
-                              <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
-                              <td className="px-4 py-3 text-center font-sans">
-                                <button
-                                  onClick={() => onEditStock(r)}
-                                  className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
-                                >
-                                  <Pencil size={12} />
-                                  수정
-                                </button>
-                              </td>
-                            </tr>
-                          ))
-                        )}
+                      {!collapsedCustomers.has(g.customer) &&
+                        g.models.map((m) => {
+                          const r = m.rows[0];
+                          const modelKey = `${g.customer}::${m.model_name}`;
+                          const modelCollapsed = collapsedModels.has(modelKey);
+                          return (
+                            <React.Fragment key={modelKey}>
+                              <tr>
+                                <td colSpan={9} className="p-0">
+                                  <ModelGroupHeader
+                                    label={m.model_name}
+                                    stats={{
+                                      order_balance: r.order_balance,
+                                      wip_qty: r.wip_qty,
+                                      product_stock: r.product_stock,
+                                    }}
+                                    collapsed={modelCollapsed}
+                                    onToggle={() => toggleModel(modelKey)}
+                                  />
+                                </td>
+                              </tr>
+                              {!modelCollapsed && (
+                                <tr className="hover:bg-slate-800/40">
+                                  <td className="px-4 py-3 font-sans text-xs text-slate-500">상세 지표</td>
+                                  <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
+                                  <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
+                                  <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
+                                  <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
+                                  <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
+                                  <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
+                                  <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
+                                  <td className="px-4 py-3 text-center font-sans">
+                                    <button
+                                      onClick={() => onEditStock(r)}
+                                      className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
+                                    >
+                                      <Pencil size={12} />
+                                      수정
+                                    </button>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
                     </React.Fragment>
                   ))
                 )}
@@ -704,15 +833,23 @@ function DashboardTab({ rows, summary, onEditStock }) {
 }
 
 /* =========================================================================
-   내역 조회 탭 공용: 고객사 그룹(접기/펼치기) + 모델명 소그룹 + 엑셀 내보내기
+   내역 조회 탭 공용: 고객사(1단계) → 모델명(2단계) 아코디언 + 엑셀 내보내기
    ========================================================================= */
-function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, exportConfig }) {
+function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, exportConfig, productLookup }) {
   const grouped = useMemo(() => groupByCustomerAndModel(rows, dateField), [rows, dateField]);
-  const [collapsed, setCollapsed] = useState(() => new Set());
-  const toggle = (customer) =>
-    setCollapsed((prev) => {
+  const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
+  const [collapsedModels, setCollapsedModels] = useState(() => new Set());
+
+  const toggleCustomer = (customer) =>
+    setCollapsedCustomers((prev) => {
       const next = new Set(prev);
       next.has(customer) ? next.delete(customer) : next.add(customer);
+      return next;
+    });
+  const toggleModel = (key) =>
+    setCollapsedModels((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
 
@@ -752,25 +889,33 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
                         <GroupHeader
                           label={g.customer}
                           count={g.totalRows}
-                          collapsed={collapsed.has(g.customer)}
-                          onToggle={() => toggle(g.customer)}
+                          collapsed={collapsedCustomers.has(g.customer)}
+                          onToggle={() => toggleCustomer(g.customer)}
                         />
                       </td>
                     </tr>
-                    {!collapsed.has(g.customer) &&
-                      g.models.map((m) => (
-                        <React.Fragment key={m.model_name}>
-                          <tr>
-                            <td
-                              colSpan={columns.length}
-                              className="bg-slate-900/70 px-4 py-1.5 text-xs font-medium text-cyan-300/80"
-                            >
-                              ▸ {m.model_name} <span className="text-slate-500">({m.rows.length}건)</span>
-                            </td>
-                          </tr>
-                          {m.rows.map(renderRow)}
-                        </React.Fragment>
-                      ))}
+                    {!collapsedCustomers.has(g.customer) &&
+                      g.models.map((m) => {
+                        const modelKey = `${g.customer}::${m.model_name}`;
+                        const modelCollapsed = collapsedModels.has(modelKey);
+                        const stats = productLookup?.get(modelKey);
+                        return (
+                          <React.Fragment key={modelKey}>
+                            <tr>
+                              <td colSpan={columns.length} className="p-0">
+                                <ModelGroupHeader
+                                  label={m.model_name}
+                                  count={m.rows.length}
+                                  stats={stats}
+                                  collapsed={modelCollapsed}
+                                  onToggle={() => toggleModel(modelKey)}
+                                />
+                              </td>
+                            </tr>
+                            {!modelCollapsed && m.rows.map(renderRow)}
+                          </React.Fragment>
+                        );
+                      })}
                   </React.Fragment>
                 ))
               )}
@@ -782,7 +927,7 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
   );
 }
 
-function SalesHistoryTab({ rows, onEdit, onRefresh }) {
+function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "sales_orders",
@@ -797,6 +942,7 @@ function SalesHistoryTab({ rows, onEdit, onRefresh }) {
       columns={["제조사", "수주일", "수량", "작업"]}
       rows={rows}
       dateField="order_date"
+      productLookup={productLookup}
       emptyLabel="수주 내역이 없습니다."
       exportConfig={{
         filename: "수주내역.xlsx",
@@ -822,7 +968,7 @@ function SalesHistoryTab({ rows, onEdit, onRefresh }) {
   );
 }
 
-function ShipmentHistoryTab({ rows, onEdit, onRefresh }) {
+function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "shipments",
@@ -837,6 +983,7 @@ function ShipmentHistoryTab({ rows, onEdit, onRefresh }) {
       columns={["제조사", "출고일", "수량", "매입가", "판매가", "작업"]}
       rows={rows}
       dateField="shipment_date"
+      productLookup={productLookup}
       emptyLabel="출고 내역이 없습니다."
       exportConfig={{
         filename: "출고내역.xlsx",
@@ -931,7 +1078,7 @@ function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
   );
 }
 
-function MaterialHistoryTab({ rows, onEdit, onRefresh }) {
+function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "material_orders",
@@ -942,7 +1089,9 @@ function MaterialHistoryTab({ rows, onEdit, onRefresh }) {
   };
 
   const handleSaveReceived = async (row, receivedQty) => {
-    await supabase.from("material_orders").update({ received_qty: receivedQty }).eq("id", row.id);
+    const { error } = await supabase.from("material_orders").update({ received_qty: receivedQty }).eq("id", row.id);
+    if (handleSupabaseError(error, "입고수량 저장")) return;
+    notifyToast("success", "입고수량이 저장되었습니다.");
     onRefresh();
   };
 
@@ -951,6 +1100,7 @@ function MaterialHistoryTab({ rows, onEdit, onRefresh }) {
       columns={["원자재 Maker", "발주일", "발주수량", "입고수량", "대기수량", "상태", "작업"]}
       rows={rows}
       dateField="order_date"
+      productLookup={productLookup}
       emptyLabel="원자재 발주 내역이 없습니다."
       exportConfig={{
         filename: "원자재발주내역.xlsx",
@@ -978,7 +1128,7 @@ function MaterialHistoryTab({ rows, onEdit, onRefresh }) {
   );
 }
 
-function PriceHistoryTab({ rows, onEdit, onRefresh }) {
+function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "price_history",
@@ -993,6 +1143,7 @@ function PriceHistoryTab({ rows, onEdit, onRefresh }) {
       columns={["적용일", "매입가", "판매가", "등록경로", "작업"]}
       rows={rows}
       dateField="effective_date"
+      productLookup={productLookup}
       emptyLabel="단가 변동 이력이 없습니다."
       exportConfig={{
         filename: "단가이력.xlsx",
@@ -1066,7 +1217,10 @@ function SalesOrderModal({ open, onClose, editing }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async () => {
-    if (!form.model_name || !form.customer || !form.quantity) return;
+    if (!form.model_name || !form.customer || !form.quantity) {
+      notifyToast("error", "모델명, 고객사, 수량은 필수 입력 항목입니다.");
+      return;
+    }
     setSaving(true);
     const payload = {
       model_name: form.model_name,
@@ -1079,7 +1233,9 @@ function SalesOrderModal({ open, onClose, editing }) {
       ? await supabase.from("sales_orders").update(payload).eq("id", editing.id)
       : await supabase.from("sales_orders").insert(payload);
     setSaving(false);
-    if (!error) onClose();
+    if (handleSupabaseError(error, editing ? "수주 내역 수정" : "수주 등록")) return;
+    notifyToast("success", editing ? "수주 내역이 수정되었습니다." : "수주가 등록되었습니다.");
+    onClose();
   };
 
   return (
@@ -1138,9 +1294,9 @@ function ShipmentModal({ open, onClose, editing }) {
         manufacturer: editing.manufacturer || "",
         quantity: String(editing.quantity ?? ""),
         purchase_currency: editing.purchase_currency || "USD",
-        purchase_price: String(editing.purchase_price ?? ""),
+        purchase_price: editing.purchase_price === null || editing.purchase_price === undefined ? "" : String(editing.purchase_price),
         sale_currency: editing.sale_currency || "KRW",
-        sale_price: String(editing.sale_price ?? ""),
+        sale_price: editing.sale_price === null || editing.sale_price === undefined ? "" : String(editing.sale_price),
         shipment_date: editing.shipment_date || todayStr(),
       });
     } else {
@@ -1152,7 +1308,10 @@ function ShipmentModal({ open, onClose, editing }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async () => {
-    if (!form.model_name || !form.customer || !form.quantity || form.purchase_price === "" || form.sale_price === "") return;
+    if (!form.model_name || !form.customer || !form.quantity || form.purchase_price === "" || form.sale_price === "") {
+      notifyToast("error", "모델명 · 고객사 · 수량 · 매입가 · 판매가는 필수 입력 항목입니다.");
+      return;
+    }
     setSaving(true);
     const payload = {
       model_name: form.model_name,
@@ -1169,7 +1328,9 @@ function ShipmentModal({ open, onClose, editing }) {
       ? await supabase.from("shipments").update(payload).eq("id", editing.id)
       : await supabase.from("shipments").insert(payload);
     setSaving(false);
-    if (!error) onClose();
+    if (handleSupabaseError(error, editing ? "출고 내역 수정" : "출고 등록")) return;
+    notifyToast("success", editing ? "출고 내역이 수정되었습니다." : "출고가 등록되었습니다.");
+    onClose();
   };
 
   return (
@@ -1259,7 +1420,10 @@ function MaterialOrderModal({ open, onClose, editing }) {
   const pendingNum = Math.max(0, quantityNum - receivedNum);
 
   const submit = async () => {
-    if (!form.model_name || !form.customer || !form.quantity) return;
+    if (!form.model_name || !form.customer || !form.quantity) {
+      notifyToast("error", "모델명, 고객사, 발주 수량은 필수 입력 항목입니다.");
+      return;
+    }
     setSaving(true);
     const payload = {
       model_name: form.model_name,
@@ -1273,7 +1437,9 @@ function MaterialOrderModal({ open, onClose, editing }) {
       ? await supabase.from("material_orders").update(payload).eq("id", editing.id)
       : await supabase.from("material_orders").insert(payload);
     setSaving(false);
-    if (!error) onClose();
+    if (handleSupabaseError(error, editing ? "원자재 발주 수정" : "원자재 발주 등록")) return;
+    notifyToast("success", editing ? "원자재 발주 내역이 수정되었습니다." : "원자재 발주가 등록되었습니다.");
+    onClose();
   };
 
   return (
@@ -1358,7 +1524,9 @@ function StockEditModal({ open, onClose, products, initial }) {
       p_new_product_stock: Number(stock),
     });
     setSaving(false);
-    if (!error) onClose();
+    if (handleSupabaseError(error, "재공/재고 수정")) return;
+    notifyToast("success", "재공/재고가 수정되었습니다.");
+    onClose();
   };
 
   return (
@@ -1419,9 +1587,9 @@ function PriceHistoryModal({ open, onClose, editing }) {
         model_name: editing.model_name || "",
         customer: editing.customer || "",
         purchase_currency: editing.purchase_currency || "USD",
-        purchase_price: String(editing.purchase_price ?? ""),
+        purchase_price: editing.purchase_price === null || editing.purchase_price === undefined ? "" : String(editing.purchase_price),
         sale_currency: editing.sale_currency || "KRW",
-        sale_price: String(editing.sale_price ?? ""),
+        sale_price: editing.sale_price === null || editing.sale_price === undefined ? "" : String(editing.sale_price),
         effective_date: editing.effective_date || todayStr(),
         memo: editing.memo || "",
       });
@@ -1434,7 +1602,10 @@ function PriceHistoryModal({ open, onClose, editing }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async () => {
-    if (!form.model_name || !form.customer) return;
+    if (!form.model_name || !form.customer) {
+      notifyToast("error", "모델명과 고객사는 필수 입력 항목입니다.");
+      return;
+    }
     setSaving(true);
     const payload = {
       model_name: form.model_name,
@@ -1450,7 +1621,9 @@ function PriceHistoryModal({ open, onClose, editing }) {
       ? await supabase.from("price_history").update(payload).eq("id", editing.id)
       : await supabase.from("price_history").insert({ ...payload, source: "manual" });
     setSaving(false);
-    if (!error) onClose();
+    if (handleSupabaseError(error, editing ? "단가 이력 수정" : "단가 이력 등록")) return;
+    notifyToast("success", editing ? "단가 이력이 수정되었습니다." : "단가 이력이 등록되었습니다.");
+    onClose();
   };
 
   return (
