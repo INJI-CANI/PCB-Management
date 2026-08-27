@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
+import * as XLSX from "xlsx";
 import {
   Cpu,
   Plus,
@@ -15,6 +16,10 @@ import {
   CircleDot,
   Building2,
   CalendarDays,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  Check,
 } from "lucide-react";
 
 /* =========================================================================
@@ -37,7 +42,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /* =========================================================================
-   포맷 유틸
+   포맷 / 공용 유틸
    ========================================================================= */
 const CURRENCY_SYMBOL = { KRW: "₩", USD: "$" };
 
@@ -67,6 +72,54 @@ async function deleteRecord(table, id, confirmMessage) {
   if (!ok) return false;
   const { error } = await supabase.from(table).delete().eq("id", id);
   return !error;
+}
+
+// 고객사 → 모델명 → (옵션) 최신 날짜순 정렬로 그룹핑
+function groupByCustomerAndModel(rows, dateField) {
+  const byCustomer = new Map();
+  for (const r of rows) {
+    if (!byCustomer.has(r.customer)) byCustomer.set(r.customer, new Map());
+    const modelMap = byCustomer.get(r.customer);
+    if (!modelMap.has(r.model_name)) modelMap.set(r.model_name, []);
+    modelMap.get(r.model_name).push(r);
+  }
+  return Array.from(byCustomer.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], "ko"))
+    .map(([customer, modelMap]) => {
+      const models = Array.from(modelMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], "ko"))
+        .map(([model_name, modelRows]) => {
+          const sorted = dateField
+            ? [...modelRows].sort((a, b) => (b[dateField] || "").localeCompare(a[dateField] || ""))
+            : modelRows;
+          return { model_name, rows: sorted };
+        });
+      const totalRows = models.reduce((sum, m) => sum + m.rows.length, 0);
+      return { customer, models, totalRows };
+    });
+}
+
+function flattenGrouped(grouped) {
+  return grouped.flatMap((g) => g.models.flatMap((m) => m.rows));
+}
+
+// 엑셀(.xlsx) 내보내기
+function exportToExcel(filename, rows, columns) {
+  if (!rows || rows.length === 0) {
+    window.alert("내보낼 데이터가 없습니다.");
+    return;
+  }
+  const data = rows.map((r) => {
+    const obj = {};
+    columns.forEach((c) => {
+      obj[c.header] = c.accessor(r);
+    });
+    return obj;
+  });
+  const ws = XLSX.utils.json_to_sheet(data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+  XLSX.writeFile(wb, filename);
 }
 
 /* =========================================================================
@@ -129,25 +182,18 @@ function Field({ label, children }) {
 const inputClass =
   "w-full min-w-0 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500";
 
-// 화폐 선택 드롭다운: 폭을 최소화(w-24)하고 절대 늘어나지 않도록 shrink-0 고정
-function CurrencySelect({ value, onChange, className = "" }) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className={`${inputClass} w-24 shrink-0 px-2 ${className}`}
-    >
-      <option value="KRW">KRW (₩)</option>
-      <option value="USD">USD ($)</option>
-    </select>
-  );
-}
-
-// 화폐 선택 + 단가 입력 한 줄 구성: select는 최소 폭, input은 남은 공간을 모두 차지
+// 화폐 선택(3) : 금액 입력(7) 비율 고정 그리드 — 좁은 모달 폭에서도 입력칸이 사라지지 않음
 function CurrencyPriceInput({ price, currency, onPriceChange, onCurrencyChange }) {
   return (
-    <div className="flex w-full items-center gap-2 overflow-hidden">
-      <CurrencySelect value={currency} onChange={onCurrencyChange} />
+    <div className="grid w-full grid-cols-10 gap-2">
+      <select
+        value={currency}
+        onChange={(e) => onCurrencyChange(e.target.value)}
+        className={`${inputClass} col-span-3 px-1.5 text-xs sm:text-sm`}
+      >
+        <option value="KRW">KRW (₩)</option>
+        <option value="USD">USD ($)</option>
+      </select>
       <input
         type="number"
         step="0.00001"
@@ -155,7 +201,7 @@ function CurrencyPriceInput({ price, currency, onPriceChange, onCurrencyChange }
         placeholder="0.00000"
         value={price}
         onChange={(e) => onPriceChange(e.target.value)}
-        className={`${inputClass} min-w-0 flex-1 text-right font-mono`}
+        className={`${inputClass} col-span-7 text-right font-mono`}
       />
     </div>
   );
@@ -169,6 +215,18 @@ function PrimaryButton({ children, onClick, icon: Icon, className = "" }) {
     >
       {Icon && <Icon size={16} />}
       {children}
+    </button>
+  );
+}
+
+function ExportButton({ onClick, label = "엑셀 내보내기" }) {
+  return (
+    <button
+      onClick={onClick}
+      className="inline-flex items-center gap-1.5 rounded-md border border-emerald-700/50 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-500/20"
+    >
+      <Download size={13} />
+      {label}
     </button>
   );
 }
@@ -193,6 +251,23 @@ function RowActions({ onEdit, onDelete }) {
         삭제
       </button>
     </div>
+  );
+}
+
+// 고객사 그룹 접기/펼치기 헤더 (아코디언)
+function GroupHeader({ label, count, collapsed, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      className="flex w-full items-center justify-between bg-slate-800/70 px-4 py-2.5 text-left hover:bg-slate-800"
+    >
+      <span className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+        <Building2 size={15} className="text-cyan-400" />
+        {label}
+        <span className="text-xs font-normal text-slate-500">({count}건)</span>
+      </span>
+      {collapsed ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronUp size={16} className="text-slate-400" />}
+    </button>
   );
 }
 
@@ -336,7 +411,7 @@ export default function App() {
         balance: Number(row.order_balance || 0),
       });
     }
-    return Array.from(map.values());
+    return Array.from(map.values()).sort((a, b) => a.customer.localeCompare(b.customer, "ko"));
   }, [dashboardRows]);
 
   return (
@@ -423,29 +498,28 @@ export default function App() {
           <SalesHistoryTab
             rows={salesRows}
             onEdit={(row) => openEdit("sales", row)}
-            onDeleted={fetchSales}
+            onRefresh={fetchSales}
           />
         )}
         {tab === "shipment" && (
           <ShipmentHistoryTab
             rows={shipmentRows}
             onEdit={(row) => openEdit("shipment", row)}
-            onDeleted={fetchShipments}
+            onRefresh={fetchShipments}
           />
         )}
         {tab === "material" && (
           <MaterialHistoryTab
             rows={materialRows}
             onEdit={(row) => openEdit("material", row)}
-            onDeleted={fetchMaterials}
-            onStatusChanged={fetchMaterials}
+            onRefresh={fetchMaterials}
           />
         )}
         {tab === "price_history" && (
           <PriceHistoryTab
             rows={priceHistoryRows}
             onEdit={(row) => openEdit("price", row)}
-            onDeleted={fetchPriceHistory}
+            onRefresh={fetchPriceHistory}
           />
         )}
       </main>
@@ -466,9 +540,33 @@ export default function App() {
 }
 
 /* =========================================================================
-   대시보드 탭
+   대시보드 탭 (고객사별 그룹 + 접기/펼치기, 모델명 breakdown, 엑셀 내보내기)
    ========================================================================= */
 function DashboardTab({ rows, summary, onEditStock }) {
+  const [collapsed, setCollapsed] = useState(() => new Set());
+  const toggle = (customer) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(customer) ? next.delete(customer) : next.add(customer);
+      return next;
+    });
+
+  const grouped = useMemo(() => groupByCustomerAndModel(rows), [rows]);
+
+  const handleExport = () => {
+    exportToExcel("대시보드_현황.xlsx", flattenGrouped(grouped), [
+      { header: "고객사", accessor: (r) => r.customer },
+      { header: "모델명", accessor: (r) => r.model_name },
+      { header: "총수주량", accessor: (r) => r.total_order_qty },
+      { header: "제품재고", accessor: (r) => r.product_stock },
+      { header: "재공", accessor: (r) => r.wip_qty },
+      { header: "납품완료", accessor: (r) => r.delivered_qty },
+      { header: "발주잔량", accessor: (r) => r.order_balance },
+      { header: "원자재재고", accessor: (r) => r.material_stock },
+      { header: "원자재대기", accessor: (r) => r.material_waiting },
+    ]);
+  };
+
   return (
     <div className="space-y-6">
       {/* 상단 요약 카드 (고객사별 + 모델명 breakdown) */}
@@ -510,127 +608,210 @@ function DashboardTab({ rows, summary, onEditStock }) {
 
             {/* 모델명 breakdown */}
             <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
-              {s.models.map((m) => (
-                <div key={m.model_name} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="truncate font-sans text-slate-300">{m.model_name}</span>
-                  <span className="shrink-0 font-mono text-slate-500">
-                    총 {formatQty(m.totalOrder)} · 완료 {formatQty(m.delivered)} · 잔량{" "}
-                    {formatQty(m.balance)}
-                  </span>
-                </div>
-              ))}
+              {s.models
+                .slice()
+                .sort((a, b) => a.model_name.localeCompare(b.model_name, "ko"))
+                .map((m) => (
+                  <div key={m.model_name} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate font-sans text-slate-300">{m.model_name}</span>
+                    <span className="shrink-0 font-mono text-slate-500">
+                      총 {formatQty(m.totalOrder)} · 완료 {formatQty(m.delivered)} · 잔량{" "}
+                      {formatQty(m.balance)}
+                    </span>
+                  </div>
+                ))}
             </div>
           </div>
         ))}
       </div>
 
-      {/* 메인 현황 테이블 */}
-      <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900">
-        <table className="w-full min-w-[980px] text-sm">
-          <thead>
-            <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
-              <th className="px-4 py-3">고객사</th>
-              <th className="px-4 py-3">모델명</th>
-              <th className="px-4 py-3 text-right">총수주량</th>
-              <th className="px-4 py-3 text-right">제품재고</th>
-              <th className="px-4 py-3 text-right">재공</th>
-              <th className="px-4 py-3 text-right">납품완료</th>
-              <th className="px-4 py-3 text-right">발주잔량</th>
-              <th className="px-4 py-3 text-right">원자재재고</th>
-              <th className="px-4 py-3 text-right">원자재대기</th>
-              <th className="px-4 py-3 text-center">관리</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/70 font-mono">
-            {rows.map((r) => (
-              <tr key={r.id} className="hover:bg-slate-800/40">
-                <td className="px-4 py-3 font-sans text-slate-300">{r.customer}</td>
-                <td className="px-4 py-3 font-sans font-medium text-slate-100">{r.model_name}</td>
-                <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
-                <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
-                <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
-                <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
-                <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
-                <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
-                <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
-                <td className="px-4 py-3 text-center font-sans">
-                  <button
-                    onClick={() => onEditStock(r)}
-                    className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
-                  >
-                    <Pencil size={12} />
-                    수정
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={10} className="px-4 py-10 text-center font-sans text-slate-500">
-                  표시할 모델 데이터가 없습니다.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      {/* 메인 현황 테이블 : 고객사별 그룹 + 접기/펼치기 */}
+      <div>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-slate-300">모델별 실시간 현황</h2>
+          <ExportButton onClick={handleExport} />
+        </div>
+        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
+                  <th className="px-4 py-3">모델명</th>
+                  <th className="px-4 py-3 text-right">총수주량</th>
+                  <th className="px-4 py-3 text-right">제품재고</th>
+                  <th className="px-4 py-3 text-right">재공</th>
+                  <th className="px-4 py-3 text-right">납품완료</th>
+                  <th className="px-4 py-3 text-right">발주잔량</th>
+                  <th className="px-4 py-3 text-right">원자재재고</th>
+                  <th className="px-4 py-3 text-right">원자재대기</th>
+                  <th className="px-4 py-3 text-center">관리</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/70 font-mono">
+                {grouped.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-10 text-center font-sans text-slate-500">
+                      표시할 모델 데이터가 없습니다.
+                    </td>
+                  </tr>
+                ) : (
+                  grouped.map((g) => (
+                    <React.Fragment key={g.customer}>
+                      <tr>
+                        <td colSpan={9} className="p-0">
+                          <GroupHeader
+                            label={g.customer}
+                            count={g.totalRows}
+                            collapsed={collapsed.has(g.customer)}
+                            onToggle={() => toggle(g.customer)}
+                          />
+                        </td>
+                      </tr>
+                      {!collapsed.has(g.customer) &&
+                        g.models.map((m) =>
+                          m.rows.map((r) => (
+                            <tr key={r.id} className="hover:bg-slate-800/40">
+                              <td className="px-4 py-3 font-sans font-medium text-slate-100">{r.model_name}</td>
+                              <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
+                              <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
+                              <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
+                              <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
+                              <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
+                              <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
+                              <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
+                              <td className="px-4 py-3 text-center font-sans">
+                                <button
+                                  onClick={() => onEditStock(r)}
+                                  className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
+                                >
+                                  <Pencil size={12} />
+                                  수정
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                    </React.Fragment>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
 /* =========================================================================
-   내역 조회 탭들
+   내역 조회 탭 공용: 고객사 그룹(접기/펼치기) + 모델명 소그룹 + 엑셀 내보내기
    ========================================================================= */
-function HistoryTable({ columns, rows, renderRow, emptyLabel }) {
+function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, exportConfig }) {
+  const grouped = useMemo(() => groupByCustomerAndModel(rows, dateField), [rows, dateField]);
+  const [collapsed, setCollapsed] = useState(() => new Set());
+  const toggle = (customer) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(customer) ? next.delete(customer) : next.add(customer);
+      return next;
+    });
+
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900">
-      <table className="w-full min-w-[980px] text-sm">
-        <thead>
-          <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
-            {columns.map((c) => (
-              <th key={c} className="px-4 py-3">
-                {c}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-800/70">
-          {rows.length === 0 ? (
-            <tr>
-              <td colSpan={columns.length} className="px-4 py-10 text-center text-slate-500">
-                {emptyLabel}
-              </td>
-            </tr>
-          ) : (
-            rows.map(renderRow)
-          )}
-        </tbody>
-      </table>
+    <div>
+      {exportConfig && (
+        <div className="mb-3 flex justify-end">
+          <ExportButton
+            onClick={() => exportToExcel(exportConfig.filename, flattenGrouped(grouped), exportConfig.columns)}
+          />
+        </div>
+      )}
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
+                {columns.map((c) => (
+                  <th key={c} className="px-4 py-3">
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/70">
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className="px-4 py-10 text-center text-slate-500">
+                    {emptyLabel}
+                  </td>
+                </tr>
+              ) : (
+                grouped.map((g) => (
+                  <React.Fragment key={g.customer}>
+                    <tr>
+                      <td colSpan={columns.length} className="p-0">
+                        <GroupHeader
+                          label={g.customer}
+                          count={g.totalRows}
+                          collapsed={collapsed.has(g.customer)}
+                          onToggle={() => toggle(g.customer)}
+                        />
+                      </td>
+                    </tr>
+                    {!collapsed.has(g.customer) &&
+                      g.models.map((m) => (
+                        <React.Fragment key={m.model_name}>
+                          <tr>
+                            <td
+                              colSpan={columns.length}
+                              className="bg-slate-900/70 px-4 py-1.5 text-xs font-medium text-cyan-300/80"
+                            >
+                              ▸ {m.model_name} <span className="text-slate-500">({m.rows.length}건)</span>
+                            </td>
+                          </tr>
+                          {m.rows.map(renderRow)}
+                        </React.Fragment>
+                      ))}
+                  </React.Fragment>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
 
-function SalesHistoryTab({ rows, onEdit, onDeleted }) {
+function SalesHistoryTab({ rows, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "sales_orders",
       row.id,
       `${row.customer} / ${row.model_name} 수주 내역을 삭제할까요?`
     );
-    if (ok) onDeleted();
+    if (ok) onRefresh();
   };
 
   return (
-    <HistoryTable
-      columns={["수주일", "고객사", "모델명", "제조사", "수량", "작업"]}
+    <GroupedHistoryTable
+      columns={["제조사", "수주일", "수량", "작업"]}
       rows={rows}
+      dateField="order_date"
       emptyLabel="수주 내역이 없습니다."
+      exportConfig={{
+        filename: "수주내역.xlsx",
+        columns: [
+          { header: "고객사", accessor: (r) => r.customer },
+          { header: "모델명", accessor: (r) => r.model_name },
+          { header: "제조사", accessor: (r) => r.manufacturer || "" },
+          { header: "수량", accessor: (r) => r.quantity },
+          { header: "수주일", accessor: (r) => r.order_date },
+        ],
+      }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.order_date)}</td>
-          <td className="px-4 py-3">{r.customer}</td>
-          <td className="px-4 py-3 font-medium text-slate-100">{r.model_name}</td>
           <td className="px-4 py-3 text-slate-400">{r.manufacturer || "-"}</td>
+          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.order_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
           <td className="px-4 py-3">
             <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
@@ -641,27 +822,40 @@ function SalesHistoryTab({ rows, onEdit, onDeleted }) {
   );
 }
 
-function ShipmentHistoryTab({ rows, onEdit, onDeleted }) {
+function ShipmentHistoryTab({ rows, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "shipments",
       row.id,
       `${row.customer} / ${row.model_name} 출고 내역을 삭제할까요?`
     );
-    if (ok) onDeleted();
+    if (ok) onRefresh();
   };
 
   return (
-    <HistoryTable
-      columns={["출고일", "고객사", "모델명", "제조사", "수량", "매입가", "판매가", "작업"]}
+    <GroupedHistoryTable
+      columns={["제조사", "출고일", "수량", "매입가", "판매가", "작업"]}
       rows={rows}
+      dateField="shipment_date"
       emptyLabel="출고 내역이 없습니다."
+      exportConfig={{
+        filename: "출고내역.xlsx",
+        columns: [
+          { header: "고객사", accessor: (r) => r.customer },
+          { header: "모델명", accessor: (r) => r.model_name },
+          { header: "제조사", accessor: (r) => r.manufacturer || "" },
+          { header: "수량", accessor: (r) => r.quantity },
+          { header: "매입가", accessor: (r) => r.purchase_price },
+          { header: "매입통화", accessor: (r) => r.purchase_currency },
+          { header: "판매가", accessor: (r) => r.sale_price },
+          { header: "판매통화", accessor: (r) => r.sale_currency },
+          { header: "출고일", accessor: (r) => r.shipment_date },
+        ],
+      }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
-          <td className="px-4 py-3">{r.customer}</td>
-          <td className="px-4 py-3 font-medium text-slate-100">{r.model_name}</td>
           <td className="px-4 py-3 text-slate-400">{r.manufacturer || "-"}</td>
+          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.sale_price, r.sale_currency)}</td>
@@ -674,76 +868,148 @@ function ShipmentHistoryTab({ rows, onEdit, onDeleted }) {
   );
 }
 
-function MaterialHistoryTab({ rows, onEdit, onDeleted, onStatusChanged }) {
+// 원자재 발주 행: 입고(도착) 수량을 직접 입력하는 부분입고 인라인 편집 포함
+function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
+  const [receivedInput, setReceivedInput] = useState(String(row.received_qty ?? 0));
+
+  useEffect(() => {
+    setReceivedInput(String(row.received_qty ?? 0));
+  }, [row.received_qty]);
+
+  const pending = Math.max(0, Number(row.quantity || 0) - Number(row.received_qty || 0));
+  const dirty = Number(receivedInput || 0) !== Number(row.received_qty || 0);
+
+  const save = async () => {
+    const clamped = Math.min(Math.max(0, Number(receivedInput) || 0), Number(row.quantity || 0));
+    await onSaveReceived(row, clamped);
+  };
+
+  const statusStyle =
+    row.status === "완료"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+      : row.status === "부분입고"
+      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
+      : "border-amber-500/30 bg-amber-500/10 text-amber-400";
+
+  return (
+    <tr className="hover:bg-slate-800/40">
+      <td className="px-4 py-3 text-slate-400">{row.material_maker || "-"}</td>
+      <td className="px-4 py-3 font-mono text-slate-300">{formatDate(row.order_date)}</td>
+      <td className="px-4 py-3 text-right font-mono">{formatQty(row.quantity)}</td>
+      <td className="px-4 py-3">
+        <div className="flex items-center justify-end gap-1.5">
+          <input
+            type="number"
+            min="0"
+            max={row.quantity}
+            value={receivedInput}
+            onChange={(e) => setReceivedInput(e.target.value)}
+            className="w-24 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+          />
+          {dirty && (
+            <button
+              onClick={save}
+              title="입고수량 저장"
+              className="inline-flex items-center rounded-md bg-cyan-500 px-1.5 py-1 text-slate-950 hover:bg-cyan-400"
+            >
+              <Check size={12} />
+            </button>
+          )}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-right font-mono text-amber-400">{formatQty(pending)}</td>
+      <td className="px-4 py-3">
+        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${statusStyle}`}>
+          <CircleDot size={10} />
+          {row.status}
+        </span>
+      </td>
+      <td className="px-4 py-3">
+        <RowActions onEdit={() => onEdit(row)} onDelete={() => onDelete(row)} />
+      </td>
+    </tr>
+  );
+}
+
+function MaterialHistoryTab({ rows, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "material_orders",
       row.id,
       `${row.customer} / ${row.model_name} 원자재 발주 내역을 삭제할까요?`
     );
-    if (ok) onDeleted();
+    if (ok) onRefresh();
   };
 
-  const handleStatusChange = async (row, status) => {
-    await supabase.from("material_orders").update({ status }).eq("id", row.id);
-    onStatusChanged();
+  const handleSaveReceived = async (row, receivedQty) => {
+    await supabase.from("material_orders").update({ received_qty: receivedQty }).eq("id", row.id);
+    onRefresh();
   };
 
   return (
-    <HistoryTable
-      columns={["발주일", "모델명", "원자재 Maker", "고객사", "수량", "입고상태", "작업"]}
+    <GroupedHistoryTable
+      columns={["원자재 Maker", "발주일", "발주수량", "입고수량", "대기수량", "상태", "작업"]}
       rows={rows}
+      dateField="order_date"
       emptyLabel="원자재 발주 내역이 없습니다."
+      exportConfig={{
+        filename: "원자재발주내역.xlsx",
+        columns: [
+          { header: "고객사", accessor: (r) => r.customer },
+          { header: "모델명", accessor: (r) => r.model_name },
+          { header: "원자재 Maker", accessor: (r) => r.material_maker || "" },
+          { header: "발주일", accessor: (r) => r.order_date },
+          { header: "발주수량", accessor: (r) => r.quantity },
+          { header: "입고수량", accessor: (r) => r.received_qty },
+          { header: "대기수량", accessor: (r) => Math.max(0, r.quantity - (r.received_qty || 0)) },
+          { header: "상태", accessor: (r) => r.status },
+        ],
+      }}
       renderRow={(r) => (
-        <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.order_date)}</td>
-          <td className="px-4 py-3 font-medium text-slate-100">{r.model_name}</td>
-          <td className="px-4 py-3 text-slate-400">{r.material_maker || "-"}</td>
-          <td className="px-4 py-3">{r.customer}</td>
-          <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
-          <td className="px-4 py-3">
-            <select
-              value={r.status}
-              onChange={(e) => handleStatusChange(r, e.target.value)}
-              className={`w-28 rounded-full border px-2 py-1 text-xs font-medium outline-none ${
-                r.status === "완료"
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                  : "border-amber-500/30 bg-amber-500/10 text-amber-400"
-              }`}
-            >
-              <option value="대기">대기</option>
-              <option value="완료">완료</option>
-            </select>
-          </td>
-          <td className="px-4 py-3">
-            <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
-          </td>
-        </tr>
+        <MaterialRowCells
+          key={r.id}
+          row={r}
+          onSaveReceived={handleSaveReceived}
+          onEdit={onEdit}
+          onDelete={handleDelete}
+        />
       )}
     />
   );
 }
 
-function PriceHistoryTab({ rows, onEdit, onDeleted }) {
+function PriceHistoryTab({ rows, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "price_history",
       row.id,
       `${row.customer} / ${row.model_name} 단가 이력을 삭제할까요?`
     );
-    if (ok) onDeleted();
+    if (ok) onRefresh();
   };
 
   return (
-    <HistoryTable
-      columns={["적용일", "고객사", "모델명", "매입가", "판매가", "등록경로", "작업"]}
+    <GroupedHistoryTable
+      columns={["적용일", "매입가", "판매가", "등록경로", "작업"]}
       rows={rows}
+      dateField="effective_date"
       emptyLabel="단가 변동 이력이 없습니다."
+      exportConfig={{
+        filename: "단가이력.xlsx",
+        columns: [
+          { header: "고객사", accessor: (r) => r.customer },
+          { header: "모델명", accessor: (r) => r.model_name },
+          { header: "적용일", accessor: (r) => r.effective_date },
+          { header: "매입가", accessor: (r) => r.purchase_price },
+          { header: "매입통화", accessor: (r) => r.purchase_currency },
+          { header: "판매가", accessor: (r) => r.sale_price },
+          { header: "판매통화", accessor: (r) => r.sale_currency },
+          { header: "등록경로", accessor: (r) => (r.source === "shipment" ? "출고 자동기록" : "수동 입력") },
+        ],
+      }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
           <td className="px-4 py-3 font-mono text-slate-300">{formatDate(r.effective_date)}</td>
-          <td className="px-4 py-3">{r.customer}</td>
-          <td className="px-4 py-3 font-medium text-slate-100">{r.model_name}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.sale_price, r.sale_currency)}</td>
           <td className="px-4 py-3">
@@ -846,7 +1112,7 @@ function SalesOrderModal({ open, onClose, editing }) {
 }
 
 /* =========================================================================
-   ② 출고 입력 / 수정 모달 (매입가 + 판매가)
+   ② 출고 입력 / 수정 모달 (매입가/판매가 각각 별도 통화)
    ========================================================================= */
 function ShipmentModal({ open, onClose, editing }) {
   const emptyForm = {
@@ -920,7 +1186,7 @@ function ShipmentModal({ open, onClose, editing }) {
       <Field label="수량">
         <input type="number" min="0" className={inputClass} value={form.quantity} onChange={set("quantity")} />
       </Field>
-      <Field label="매입가 (통화 + 소수점 5자리까지)">
+      <Field label="매입가 (통화 3 : 금액 7)">
         <CurrencyPriceInput
           price={form.purchase_price}
           currency={form.purchase_currency}
@@ -928,7 +1194,7 @@ function ShipmentModal({ open, onClose, editing }) {
           onCurrencyChange={(v) => setForm((f) => ({ ...f, purchase_currency: v }))}
         />
       </Field>
-      <Field label="판매가 (통화 + 소수점 5자리까지)">
+      <Field label="판매가 (통화 3 : 금액 7)">
         <CurrencyPriceInput
           price={form.sale_price}
           currency={form.sale_currency}
@@ -955,7 +1221,7 @@ function ShipmentModal({ open, onClose, editing }) {
 }
 
 /* =========================================================================
-   ③ 원자재 발주 입력 / 수정 모달
+   ③ 원자재 발주 입력 / 수정 모달 (입고수량 직접 입력 — 부분입고 지원)
    ========================================================================= */
 function MaterialOrderModal({ open, onClose, editing }) {
   const emptyForm = {
@@ -964,7 +1230,7 @@ function MaterialOrderModal({ open, onClose, editing }) {
     customer: "",
     quantity: "",
     order_date: todayStr(),
-    status: "대기",
+    received_qty: "0",
   };
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
@@ -978,7 +1244,7 @@ function MaterialOrderModal({ open, onClose, editing }) {
         customer: editing.customer || "",
         quantity: String(editing.quantity ?? ""),
         order_date: editing.order_date || todayStr(),
-        status: editing.status || "대기",
+        received_qty: String(editing.received_qty ?? 0),
       });
     } else {
       setForm(emptyForm);
@@ -987,6 +1253,10 @@ function MaterialOrderModal({ open, onClose, editing }) {
   }, [open, editing]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const quantityNum = Number(form.quantity) || 0;
+  const receivedNum = Math.min(Math.max(0, Number(form.received_qty) || 0), quantityNum || Number(form.received_qty) || 0);
+  const pendingNum = Math.max(0, quantityNum - receivedNum);
 
   const submit = async () => {
     if (!form.model_name || !form.customer || !form.quantity) return;
@@ -997,7 +1267,7 @@ function MaterialOrderModal({ open, onClose, editing }) {
       customer: form.customer,
       quantity: Number(form.quantity),
       order_date: form.order_date,
-      status: form.status,
+      received_qty: Math.min(Math.max(0, Number(form.received_qty) || 0), Number(form.quantity)),
     };
     const { error } = editing
       ? await supabase.from("material_orders").update(payload).eq("id", editing.id)
@@ -1017,19 +1287,26 @@ function MaterialOrderModal({ open, onClose, editing }) {
       <Field label="고객사">
         <input className={inputClass} value={form.customer} onChange={set("customer")} />
       </Field>
-      <Field label="수량">
+      <Field label="발주 수량">
         <input type="number" min="0" className={inputClass} value={form.quantity} onChange={set("quantity")} />
       </Field>
       <Field label="발주일">
         <input type="date" className={inputClass} value={form.order_date} onChange={set("order_date")} />
       </Field>
-      <Field label="입고상태">
-        <select className={inputClass} value={form.status} onChange={set("status")}>
-          <option value="대기">대기</option>
-          <option value="완료">완료</option>
-        </select>
+      <Field label="입고(도착) 수량">
+        <input
+          type="number"
+          min="0"
+          max={form.quantity || undefined}
+          className={inputClass}
+          value={form.received_qty}
+          onChange={set("received_qty")}
+        />
       </Field>
-      <div className="mt-4 flex justify-end gap-2">
+      <p className="mb-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
+        발주 {formatQty(quantityNum)}개 중 입고 {formatQty(receivedNum)}개 → 대기(미입고) {formatQty(pendingNum)}개로 자동 계산됩니다. 부분 입고 시에는 도착한 수량만큼만 입력하세요.
+      </p>
+      <div className="mt-2 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
           취소
         </button>
@@ -1119,14 +1396,15 @@ function StockEditModal({ open, onClose, products, initial }) {
 }
 
 /* =========================================================================
-   ⑤ 단가 이력 추가 / 수정 모달 (수동 입력)
+   ⑤ 단가 이력 추가 / 수정 모달 (수동 입력, 매입/판매 각각 별도 통화)
    ========================================================================= */
 function PriceHistoryModal({ open, onClose, editing }) {
   const emptyForm = {
     model_name: "",
     customer: "",
-    currency: "KRW",
+    purchase_currency: "USD",
     purchase_price: "",
+    sale_currency: "KRW",
     sale_price: "",
     effective_date: todayStr(),
     memo: "",
@@ -1140,8 +1418,9 @@ function PriceHistoryModal({ open, onClose, editing }) {
       setForm({
         model_name: editing.model_name || "",
         customer: editing.customer || "",
-        currency: editing.currency || "KRW",
+        purchase_currency: editing.purchase_currency || "USD",
         purchase_price: String(editing.purchase_price ?? ""),
+        sale_currency: editing.sale_currency || "KRW",
         sale_price: String(editing.sale_price ?? ""),
         effective_date: editing.effective_date || todayStr(),
         memo: editing.memo || "",
@@ -1160,8 +1439,9 @@ function PriceHistoryModal({ open, onClose, editing }) {
     const payload = {
       model_name: form.model_name,
       customer: form.customer,
-      currency: form.currency,
+      purchase_currency: form.purchase_currency,
       purchase_price: form.purchase_price === "" ? null : Number(form.purchase_price),
+      sale_currency: form.sale_currency,
       sale_price: form.sale_price === "" ? null : Number(form.sale_price),
       effective_date: form.effective_date,
       memo: form.memo || null,
@@ -1181,31 +1461,20 @@ function PriceHistoryModal({ open, onClose, editing }) {
       <Field label="고객사">
         <input className={inputClass} value={form.customer} onChange={set("customer")} />
       </Field>
-      <Field label="통화">
-        <div className="w-full overflow-hidden">
-          <CurrencySelect value={form.currency} onChange={(v) => setForm((f) => ({ ...f, currency: v }))} className="w-32" />
-        </div>
-      </Field>
-      <Field label="매입가 (소수점 5자리까지)">
-        <input
-          type="number"
-          step="0.00001"
-          min="0"
-          placeholder="0.00000"
-          className={`${inputClass} text-right font-mono`}
-          value={form.purchase_price}
-          onChange={set("purchase_price")}
+      <Field label="매입가 (통화 3 : 금액 7)">
+        <CurrencyPriceInput
+          price={form.purchase_price}
+          currency={form.purchase_currency}
+          onPriceChange={(v) => setForm((f) => ({ ...f, purchase_price: v }))}
+          onCurrencyChange={(v) => setForm((f) => ({ ...f, purchase_currency: v }))}
         />
       </Field>
-      <Field label="판매가 (소수점 5자리까지)">
-        <input
-          type="number"
-          step="0.00001"
-          min="0"
-          placeholder="0.00000"
-          className={`${inputClass} text-right font-mono`}
-          value={form.sale_price}
-          onChange={set("sale_price")}
+      <Field label="판매가 (통화 3 : 금액 7)">
+        <CurrencyPriceInput
+          price={form.sale_price}
+          currency={form.sale_currency}
+          onPriceChange={(v) => setForm((f) => ({ ...f, sale_price: v }))}
+          onCurrencyChange={(v) => setForm((f) => ({ ...f, sale_currency: v }))}
         />
       </Field>
       <Field label="적용일">
