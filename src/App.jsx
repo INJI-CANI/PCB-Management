@@ -288,6 +288,61 @@ function ExportButton({ onClick, label = "엑셀 내보내기" }) {
   );
 }
 
+// 엑셀 내보내기 전 기간(시작일~종료일)을 선택하는 모달
+function ExportRangeModal({ open, onClose, onConfirm, dateHint }) {
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setStart("");
+      setEnd("");
+    }
+  }, [open]);
+
+  const confirm = () => {
+    if (start && end && start > end) {
+      notifyToast("error", "시작일이 종료일보다 늦을 수 없습니다.");
+      return;
+    }
+    onConfirm(start || null, end || null);
+    onClose();
+  };
+
+  return (
+    <Modal open={open} title="엑셀 내보내기 — 기간 선택" onClose={onClose}>
+      {dateHint && <p className="mb-3 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">{dateHint}</p>}
+      <Field label="시작일 (비워두면 전체 기간)">
+        <input type="date" className={inputClass} value={start} onChange={(e) => setStart(e.target.value)} />
+      </Field>
+      <Field label="종료일 (비워두면 전체 기간)">
+        <input type="date" className={inputClass} value={end} onChange={(e) => setEnd(e.target.value)} />
+      </Field>
+      <div className="mt-4 flex justify-end gap-2">
+        <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
+          취소
+        </button>
+        <PrimaryButton icon={Download} onClick={confirm}>
+          엑셀로 내보내기
+        </PrimaryButton>
+      </div>
+    </Modal>
+  );
+}
+
+// 지정한 날짜 필드를 기준으로 기간(start~end, 각각 null이면 무제한) 내 행만 필터링
+function filterRowsByDateRange(rows, dateField, start, end) {
+  if (!start && !end) return rows;
+  return rows.filter((r) => {
+    const raw = r[dateField];
+    const d = raw ? String(raw).slice(0, 10) : null;
+    if (!d) return true;
+    if (start && d < start) return false;
+    if (end && d > end) return false;
+    return true;
+  });
+}
+
 function RowActions({ onEdit, onDelete }) {
   return (
     <div className="flex items-center justify-center gap-1.5">
@@ -672,18 +727,24 @@ function DashboardTab({ rows, summary, onEditStock }) {
       return next;
     });
 
-  const handleExport = () => {
-    exportToExcel("대시보드_현황.xlsx", flattenGrouped(grouped), [
-      { header: "고객사", accessor: (r) => r.customer },
-      { header: "모델명", accessor: (r) => r.model_name },
-      { header: "총수주량", accessor: (r) => r.total_order_qty },
-      { header: "제품재고", accessor: (r) => r.product_stock },
-      { header: "재공", accessor: (r) => r.wip_qty },
-      { header: "납품완료", accessor: (r) => r.delivered_qty },
-      { header: "발주잔량", accessor: (r) => r.order_balance },
-      { header: "원자재재고", accessor: (r) => r.material_stock },
-      { header: "원자재대기", accessor: (r) => r.material_waiting },
-    ]);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  const DASHBOARD_EXPORT_COLUMNS = [
+    { header: "고객사", accessor: (r) => r.customer },
+    { header: "모델명", accessor: (r) => r.model_name },
+    { header: "총수주량", accessor: (r) => r.total_order_qty },
+    { header: "제품재고", accessor: (r) => r.product_stock },
+    { header: "재공", accessor: (r) => r.wip_qty },
+    { header: "납품완료", accessor: (r) => r.delivered_qty },
+    { header: "발주잔량", accessor: (r) => r.order_balance },
+    { header: "원자재재고", accessor: (r) => r.material_stock },
+    { header: "원자재대기", accessor: (r) => r.material_waiting },
+  ];
+
+  const handleExport = (start, end) => {
+    const filtered = filterRowsByDateRange(rows, "updated_at", start, end);
+    const filteredGrouped = groupByCustomerAndModel(filtered);
+    exportToExcel("대시보드_현황.xlsx", flattenGrouped(filteredGrouped), DASHBOARD_EXPORT_COLUMNS);
   };
 
   return (
@@ -738,7 +799,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
       <div>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-300">모델별 실시간 현황</h2>
-          <ExportButton onClick={handleExport} />
+          <ExportButton onClick={() => setExportModalOpen(true)} />
         </div>
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
           <div className="overflow-x-auto">
@@ -829,6 +890,13 @@ function DashboardTab({ rows, summary, onEditStock }) {
           </div>
         </div>
       </div>
+
+      <ExportRangeModal
+        open={exportModalOpen}
+        onClose={() => setExportModalOpen(false)}
+        onConfirm={handleExport}
+        dateHint="최종 갱신일(재공/재고 최종 수정 시각) 기준으로 필터링합니다."
+      />
     </div>
   );
 }
@@ -840,6 +908,7 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
   const grouped = useMemo(() => groupByCustomerAndModel(rows, dateField), [rows, dateField]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
   const [collapsedModels, setCollapsedModels] = useState(() => new Set());
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   const toggleCustomer = (customer) =>
     setCollapsedCustomers((prev) => {
@@ -854,13 +923,17 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
       return next;
     });
 
+  const handleExport = (start, end) => {
+    const filtered = filterRowsByDateRange(rows, dateField, start, end);
+    const filteredGrouped = groupByCustomerAndModel(filtered, dateField);
+    exportToExcel(exportConfig.filename, flattenGrouped(filteredGrouped), exportConfig.columns);
+  };
+
   return (
     <div>
       {exportConfig && (
         <div className="mb-3 flex justify-end">
-          <ExportButton
-            onClick={() => exportToExcel(exportConfig.filename, flattenGrouped(grouped), exportConfig.columns)}
-          />
+          <ExportButton onClick={() => setExportModalOpen(true)} />
         </div>
       )}
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
@@ -924,6 +997,15 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
           </table>
         </div>
       </div>
+
+      {exportConfig && (
+        <ExportRangeModal
+          open={exportModalOpen}
+          onClose={() => setExportModalOpen(false)}
+          onConfirm={handleExport}
+          dateHint={exportConfig.dateHint}
+        />
+      )}
     </div>
   );
 }
@@ -952,6 +1034,7 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       emptyLabel="수주 내역이 없습니다."
       exportConfig={{
         filename: "수주내역.xlsx",
+        dateHint: "수주일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
           { header: "모델명", accessor: (r) => r.model_name },
@@ -1000,6 +1083,7 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       emptyLabel="출고 내역이 없습니다."
       exportConfig={{
         filename: "출고내역.xlsx",
+        dateHint: "출고일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
           { header: "모델명", accessor: (r) => r.model_name },
@@ -1125,6 +1209,7 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       emptyLabel="원자재 발주 내역이 없습니다."
       exportConfig={{
         filename: "원자재발주내역.xlsx",
+        dateHint: "발주일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
           { header: "모델명", accessor: (r) => r.model_name },
@@ -1174,6 +1259,7 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       emptyLabel="단가 변동 이력이 없습니다."
       exportConfig={{
         filename: "단가이력.xlsx",
+        dateHint: "적용일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
           { header: "모델명", accessor: (r) => r.model_name },
