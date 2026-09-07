@@ -22,14 +22,13 @@ import {
   Check,
   AlertTriangle,
   CheckCircle2,
+  FlaskConical,
+  Factory,
 } from "lucide-react";
 
 /* =========================================================================
    Supabase 클라이언트 설정
    ⚠️ URL / ANON KEY는 하드코딩하지 않고 Vite 환경변수로 주입받습니다.
-   로컬 개발 시에는 프로젝트 루트에 .env 파일을 만들어 아래 두 값을 채우고,
-   Vercel 배포 시에는 프로젝트 Settings > Environment Variables 에서
-   VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY 를 각각 등록하세요.
    ========================================================================= */
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -44,7 +43,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /* =========================================================================
-   토스트 알림 (성공/실패 피드백) — 저장이 "조용히" 실패하지 않도록 함
+   토스트 알림
    ========================================================================= */
 let toastListeners = [];
 function notifyToast(type, message) {
@@ -86,7 +85,6 @@ function ToastHost() {
   );
 }
 
-// Supabase 응답의 error를 일관되게 처리: 콘솔 로그 + 토스트 알림
 function handleSupabaseError(error, actionLabel) {
   if (!error) return false;
   // eslint-disable-next-line no-console
@@ -100,6 +98,8 @@ function handleSupabaseError(error, actionLabel) {
    ========================================================================= */
 const CURRENCY_SYMBOL = { KRW: "₩", USD: "$" };
 const ALIGN_CLASS = { left: "text-left", center: "text-center", right: "text-right" };
+const TYPE_ORDER = { sample: 0, mp: 1 };
+const TYPE_LABEL = { sample: "Sample", mp: "MP" };
 
 function formatPrice(value, currency) {
   if (value === null || value === undefined || value === "") return "-";
@@ -131,36 +131,45 @@ async function deleteRecord(table, id, confirmMessage) {
   return true;
 }
 
-// 고객사 → 모델명 → (옵션) 최신 날짜순 정렬로 그룹핑
-function groupByCustomerAndModel(rows, dateField) {
+// 고객사 → 구분(Sample/MP) → 모델명 → (옵션) 최신 날짜순 정렬로 그룹핑 (4단계 아코디언용)
+function groupByCustomerTypeModel(rows, dateField) {
   const byCustomer = new Map();
   for (const r of rows) {
+    const type = r.product_type || "mp";
     if (!byCustomer.has(r.customer)) byCustomer.set(r.customer, new Map());
-    const modelMap = byCustomer.get(r.customer);
+    const typeMap = byCustomer.get(r.customer);
+    if (!typeMap.has(type)) typeMap.set(type, new Map());
+    const modelMap = typeMap.get(type);
     if (!modelMap.has(r.model_name)) modelMap.set(r.model_name, []);
     modelMap.get(r.model_name).push(r);
   }
+
   return Array.from(byCustomer.entries())
     .sort((a, b) => a[0].localeCompare(b[0], "ko"))
-    .map(([customer, modelMap]) => {
-      const models = Array.from(modelMap.entries())
-        .sort((a, b) => a[0].localeCompare(b[0], "ko"))
-        .map(([model_name, modelRows]) => {
-          const sorted = dateField
-            ? [...modelRows].sort((a, b) => (b[dateField] || "").localeCompare(a[dateField] || ""))
-            : modelRows;
-          return { model_name, rows: sorted };
+    .map(([customer, typeMap]) => {
+      const types = Array.from(typeMap.entries())
+        .sort((a, b) => (TYPE_ORDER[a[0]] ?? 9) - (TYPE_ORDER[b[0]] ?? 9))
+        .map(([type, modelMap]) => {
+          const models = Array.from(modelMap.entries())
+            .sort((a, b) => a[0].localeCompare(b[0], "ko"))
+            .map(([model_name, modelRows]) => {
+              const sorted = dateField
+                ? [...modelRows].sort((a, b) => (b[dateField] || "").localeCompare(a[dateField] || ""))
+                : modelRows;
+              return { model_name, rows: sorted };
+            });
+          const totalRows = models.reduce((sum, m) => sum + m.rows.length, 0);
+          return { type, models, totalRows };
         });
-      const totalRows = models.reduce((sum, m) => sum + m.rows.length, 0);
-      return { customer, models, totalRows };
+      const totalRows = types.reduce((sum, t) => sum + t.totalRows, 0);
+      return { customer, types, totalRows };
     });
 }
 
-function flattenGrouped(grouped) {
-  return grouped.flatMap((g) => g.models.flatMap((m) => m.rows));
+function flattenGroupedTyped(grouped) {
+  return grouped.flatMap((g) => g.types.flatMap((t) => t.models.flatMap((m) => m.rows)));
 }
 
-// 엑셀(.xlsx) 내보내기
 function exportToExcel(filename, rows, columns) {
   if (!rows || rows.length === 0) {
     window.alert("내보낼 데이터가 없습니다.");
@@ -179,6 +188,18 @@ function exportToExcel(filename, rows, columns) {
   XLSX.writeFile(wb, filename);
 }
 
+function filterRowsByDateRange(rows, dateField, start, end) {
+  if (!start && !end) return rows;
+  return rows.filter((r) => {
+    const raw = r[dateField];
+    const d = raw ? String(raw).slice(0, 10) : null;
+    if (!d) return true;
+    if (start && d < start) return false;
+    if (end && d > end) return false;
+    return true;
+  });
+}
+
 /* =========================================================================
    공용 UI 조각
    ========================================================================= */
@@ -190,16 +211,8 @@ function TraceHeaderPattern() {
       preserveAspectRatio="none"
       fill="none"
     >
-      <path
-        d="M0 20 H120 L140 40 H300 L320 20 H500 L520 40 H700 L720 20 H800"
-        stroke="#22d3ee"
-        strokeWidth="1.5"
-      />
-      <path
-        d="M0 90 H180 L200 70 H360 L380 90 H560 L580 70 H800"
-        stroke="#f59e0b"
-        strokeWidth="1.5"
-      />
+      <path d="M0 20 H120 L140 40 H300 L320 20 H500 L520 40 H700 L720 20 H800" stroke="#22d3ee" strokeWidth="1.5" />
+      <path d="M0 90 H180 L200 70 H360 L380 90 H560 L580 70 H800" stroke="#f59e0b" strokeWidth="1.5" />
       {[120, 300, 500, 700, 180, 360, 560].map((x, i) => (
         <circle key={i} cx={x} cy={i % 2 === 0 ? 20 : 90} r="3" fill="#22d3ee" />
       ))}
@@ -214,10 +227,7 @@ function Modal({ open, title, onClose, children }) {
       <div className="w-full max-w-lg overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
           <h3 className="text-base font-semibold text-slate-100">{title}</h3>
-          <button
-            onClick={onClose}
-            className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-          >
+          <button onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100">
             <X size={18} />
           </button>
         </div>
@@ -239,7 +249,7 @@ function Field({ label, children }) {
 const inputClass =
   "w-full min-w-0 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500";
 
-// 화폐 선택(3) : 금액 입력(7) 비율 고정 그리드 — 좁은 모달 폭에서도 입력칸이 사라지지 않음
+// 화폐 선택(3) : 금액 입력(7) 비율 고정 그리드
 function CurrencyPriceInput({ price, currency, onPriceChange, onCurrencyChange }) {
   return (
     <div className="grid w-full grid-cols-10 gap-2">
@@ -261,6 +271,107 @@ function CurrencyPriceInput({ price, currency, onPriceChange, onCurrencyChange }
         className={`${inputClass} col-span-7 text-right font-mono`}
       />
     </div>
+  );
+}
+
+// 드롭다운 선택 + 직접 입력을 모두 지원하는 계층형 셀렉트
+// options가 바뀌는 시점(resetKey)에 맞춰 선택모드/직접입력모드를 다시 판단합니다.
+function HierarchicalSelect({ value, onChange, options, addLabel, resetKey }) {
+  const [customMode, setCustomMode] = useState(options.length === 0);
+
+  useEffect(() => {
+    setCustomMode(options.length === 0 || !options.includes(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
+
+  if (customMode) {
+    return (
+      <div className="flex gap-2">
+        <input
+          className={inputClass}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={addLabel}
+          autoFocus
+        />
+        {options.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setCustomMode(false)}
+            className="shrink-0 rounded-md border border-slate-700 px-2 text-xs text-slate-300 hover:bg-slate-800"
+          >
+            목록
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <select
+      value={options.includes(value) ? value : ""}
+      onChange={(e) => {
+        if (e.target.value === "__add__") {
+          setCustomMode(true);
+          onChange("");
+        } else {
+          onChange(e.target.value);
+        }
+      }}
+      className={inputClass}
+    >
+      <option value="" disabled>
+        선택하세요
+      </option>
+      <option value="__add__">{addLabel}</option>
+      {options.map((o) => (
+        <option key={o} value={o}>
+          {o}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// Sample / MP 선택 토글
+function ProductTypeToggle({ value, onChange }) {
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
+      <button
+        type="button"
+        onClick={() => onChange("sample")}
+        className={`flex items-center justify-center gap-1.5 rounded-md py-2 text-sm font-bold transition-colors ${
+          value === "sample" ? "bg-purple-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+        }`}
+      >
+        <FlaskConical size={14} />
+        Sample
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("mp")}
+        className={`flex items-center justify-center gap-1.5 rounded-md py-2 text-sm font-bold transition-colors ${
+          value === "mp" ? "bg-cyan-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+        }`}
+      >
+        <Factory size={14} />
+        MP (양산)
+      </button>
+    </div>
+  );
+}
+
+function TypeBadge({ type, className = "" }) {
+  const isSample = type === "sample";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold ${
+        isSample ? "bg-purple-500/20 text-purple-300" : "bg-cyan-500/20 text-cyan-300"
+      } ${className}`}
+    >
+      {isSample ? <FlaskConical size={10} /> : <Factory size={10} />}
+      {TYPE_LABEL[type] || type}
+    </span>
   );
 }
 
@@ -288,7 +399,6 @@ function ExportButton({ onClick, label = "엑셀 내보내기" }) {
   );
 }
 
-// 엑셀 내보내기 전 기간(시작일~종료일)을 선택하는 모달
 function ExportRangeModal({ open, onClose, onConfirm, dateHint }) {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -330,19 +440,6 @@ function ExportRangeModal({ open, onClose, onConfirm, dateHint }) {
   );
 }
 
-// 지정한 날짜 필드를 기준으로 기간(start~end, 각각 null이면 무제한) 내 행만 필터링
-function filterRowsByDateRange(rows, dateField, start, end) {
-  if (!start && !end) return rows;
-  return rows.filter((r) => {
-    const raw = r[dateField];
-    const d = raw ? String(raw).slice(0, 10) : null;
-    if (!d) return true;
-    if (start && d < start) return false;
-    if (end && d > end) return false;
-    return true;
-  });
-}
-
 function RowActions({ onEdit, onDelete }) {
   return (
     <div className="flex items-center justify-center gap-1.5">
@@ -366,7 +463,7 @@ function RowActions({ onEdit, onDelete }) {
   );
 }
 
-// 1단계: 고객사 그룹 접기/펼치기 헤더
+// 1단계: 고객사
 function GroupHeader({ label, count, collapsed, onToggle }) {
   return (
     <button
@@ -383,12 +480,31 @@ function GroupHeader({ label, count, collapsed, onToggle }) {
   );
 }
 
-// 2단계: 모델명 그룹 접기/펼치기 헤더 — 모델명을 굵고 크게 강조 + 핵심 수치(발주잔량/재공/재고) 표시
+// 2단계: Sample / MP 구분
+function TypeGroupHeader({ type, count, collapsed, onToggle }) {
+  const isSample = type === "sample";
+  return (
+    <button
+      onClick={onToggle}
+      className={`flex w-full items-center justify-between border-t border-slate-800/60 px-4 py-2 pl-8 text-left ${
+        isSample ? "bg-purple-500/5 hover:bg-purple-500/10" : "bg-cyan-500/5 hover:bg-cyan-500/10"
+      }`}
+    >
+      <span className="flex items-center gap-2">
+        <TypeBadge type={type} />
+        <span className="text-xs font-normal text-slate-500">({count}건)</span>
+      </span>
+      {collapsed ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronUp size={14} className="text-slate-400" />}
+    </button>
+  );
+}
+
+// 3단계: 모델명 — 굵고 크게 강조 + 핵심 수치(발주잔량/재공/재고) 표시
 function ModelGroupHeader({ label, count, stats, collapsed, onToggle }) {
   return (
     <button
       onClick={onToggle}
-      className="flex w-full items-center justify-between gap-3 border-t border-slate-800/60 bg-slate-900/70 px-4 py-2.5 text-left hover:bg-slate-800/60"
+      className="flex w-full items-center justify-between gap-3 border-t border-slate-800/60 bg-slate-900/70 px-4 py-2.5 pl-12 text-left hover:bg-slate-800/60"
     >
       <span className="flex min-w-0 items-center gap-2">
         <span className="truncate text-base font-bold text-slate-50 sm:text-lg">{label}</span>
@@ -428,7 +544,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [lastSync, setLastSync] = useState(null);
 
-  // modal: 'sales' | 'shipment' | 'material' | 'stock' | 'price'
   const [modal, setModal] = useState(null);
   const [editingRecord, setEditingRecord] = useState(null);
 
@@ -445,7 +560,6 @@ export default function App() {
     setEditingRecord(null);
   };
 
-  /* ---------------- 데이터 조회 ---------------- */
   const fetchDashboard = useCallback(async () => {
     const { data, error } = await supabase
       .from("dashboard_view")
@@ -499,13 +613,7 @@ export default function App() {
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([
-      fetchDashboard(),
-      fetchSales(),
-      fetchShipments(),
-      fetchMaterials(),
-      fetchPriceHistory(),
-    ]);
+    await Promise.all([fetchDashboard(), fetchSales(), fetchShipments(), fetchMaterials(), fetchPriceHistory()]);
     setLoading(false);
   }, [fetchDashboard, fetchSales, fetchShipments, fetchMaterials, fetchPriceHistory]);
 
@@ -514,9 +622,7 @@ export default function App() {
 
     const channel = supabase
       .channel("pcb-realtime-changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "products" }, () => {
-        fetchDashboard();
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "products" }, () => fetchDashboard())
       .on("postgres_changes", { event: "*", schema: "public", table: "sales_orders" }, () => {
         fetchDashboard();
         fetchSales();
@@ -529,9 +635,7 @@ export default function App() {
         fetchDashboard();
         fetchMaterials();
       })
-      .on("postgres_changes", { event: "*", schema: "public", table: "price_history" }, () => {
-        fetchPriceHistory();
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "price_history" }, () => fetchPriceHistory())
       .subscribe();
 
     return () => {
@@ -540,7 +644,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ---------------- 고객사별 요약 (+ 모델명 breakdown) ---------------- */
+  /* ---------------- 고객사별 요약 (Sample+MP 통합, 모델명 breakdown) ---------------- */
   const summaryByCustomer = useMemo(() => {
     const map = new Map();
     for (const row of dashboardRows) {
@@ -554,6 +658,7 @@ export default function App() {
       cur.balance += Number(row.order_balance || 0);
       cur.models.push({
         model_name: row.model_name,
+        product_type: row.product_type,
         totalOrder: Number(row.total_order_qty || 0),
         delivered: Number(row.delivered_qty || 0),
         balance: Number(row.order_balance || 0),
@@ -562,11 +667,11 @@ export default function App() {
     return Array.from(map.values()).sort((a, b) => a.customer.localeCompare(b.customer, "ko"));
   }, [dashboardRows]);
 
-  // 고객사+모델명 → 발주잔량/재공/재고 조회용 (모든 내역 테이블에서 모델 헤더 옆에 표시)
+  // 고객사+구분+모델명 → 발주잔량/재공/재고 조회용
   const productLookup = useMemo(() => {
     const map = new Map();
     for (const r of dashboardRows) {
-      map.set(`${r.customer}::${r.model_name}`, {
+      map.set(`${r.customer}::${r.product_type}::${r.model_name}`, {
         order_balance: r.order_balance,
         wip_qty: r.wip_qty,
         product_stock: r.product_stock,
@@ -575,9 +680,20 @@ export default function App() {
     return map;
   }, [dashboardRows]);
 
+  // 고객사 → 제조사 → 모델명 계층형 카탈로그 (드롭다운용, dashboardRows에서 파생)
+  const catalog = useMemo(
+    () =>
+      dashboardRows.map((r) => ({
+        customer: r.customer,
+        manufacturer: r.manufacturer || "",
+        model_name: r.model_name,
+        product_type: r.product_type,
+      })),
+    [dashboardRows]
+  );
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
-      {/* ---------------- 헤더 ---------------- */}
       <header className="relative overflow-hidden border-b border-slate-800 bg-slate-900">
         <TraceHeaderPattern />
         <div className="relative mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
@@ -586,9 +702,7 @@ export default function App() {
               <Cpu size={20} />
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight text-slate-50">
-                PCB 제품 · 원자재 통합 현황판
-              </h1>
+              <h1 className="text-lg font-bold tracking-tight text-slate-50">PCB 제품 · 원자재 통합 현황판</h1>
               <p className="text-xs text-slate-400">실시간 동기화 · 담당자 2인 공용</p>
             </div>
           </div>
@@ -598,7 +712,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* 탭 네비게이션 */}
         <nav className="relative mx-auto flex max-w-7xl flex-wrap gap-1 px-6">
           {[
             { key: "dashboard", label: "실시간 대시보드", icon: LayoutDashboard },
@@ -611,9 +724,7 @@ export default function App() {
               key={t.key}
               onClick={() => setTab(t.key)}
               className={`flex items-center gap-1.5 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                tab === t.key
-                  ? "border-cyan-400 text-cyan-300"
-                  : "border-transparent text-slate-400 hover:text-slate-200"
+                tab === t.key ? "border-cyan-400 text-cyan-300" : "border-transparent text-slate-400 hover:text-slate-200"
               }`}
             >
               <t.icon size={15} />
@@ -623,7 +734,6 @@ export default function App() {
         </nav>
       </header>
 
-      {/* ---------------- 액션 바 ---------------- */}
       <div className="mx-auto flex max-w-7xl flex-wrap gap-2 px-6 pt-5">
         <PrimaryButton icon={Plus} onClick={() => openCreate("sales")}>
           수주 입력
@@ -646,14 +756,9 @@ export default function App() {
         </button>
       </div>
 
-      {/* ---------------- 본문 ---------------- */}
       <main className="mx-auto max-w-7xl px-6 py-6">
         {tab === "dashboard" && (
-          <DashboardTab
-            rows={dashboardRows}
-            summary={summaryByCustomer}
-            onEditStock={(row) => openEdit("stock", row)}
-          />
+          <DashboardTab rows={dashboardRows} summary={summaryByCustomer} onEditStock={(row) => openEdit("stock", row)} />
         )}
         {tab === "sales" && (
           <SalesHistoryTab
@@ -689,17 +794,11 @@ export default function App() {
         )}
       </main>
 
-      {/* ---------------- 모달들 ---------------- */}
-      <SalesOrderModal open={modal === "sales"} onClose={closeModal} editing={editingRecord} />
-      <ShipmentModal open={modal === "shipment"} onClose={closeModal} editing={editingRecord} />
-      <MaterialOrderModal open={modal === "material"} onClose={closeModal} editing={editingRecord} />
-      <PriceHistoryModal open={modal === "price"} onClose={closeModal} editing={editingRecord} />
-      <StockEditModal
-        open={modal === "stock"}
-        onClose={closeModal}
-        products={dashboardRows}
-        initial={editingRecord}
-      />
+      <SalesOrderModal open={modal === "sales"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
+      <ShipmentModal open={modal === "shipment"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
+      <MaterialOrderModal open={modal === "material"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
+      <PriceHistoryModal open={modal === "price"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
+      <StockEditModal open={modal === "stock"} onClose={closeModal} products={dashboardRows} initial={editingRecord} />
 
       <ToastHost />
     </div>
@@ -707,17 +806,25 @@ export default function App() {
 }
 
 /* =========================================================================
-   대시보드 탭 (고객사 → 모델명 2단계 아코디언, 엑셀 내보내기)
+   대시보드 탭 (고객사 → 구분 → 모델명 3단계 아코디언 + 기간필터 엑셀)
    ========================================================================= */
 function DashboardTab({ rows, summary, onEditStock }) {
-  const grouped = useMemo(() => groupByCustomerAndModel(rows), [rows]);
+  const grouped = useMemo(() => groupByCustomerTypeModel(rows), [rows]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
+  const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
   const [collapsedModels, setCollapsedModels] = useState(() => new Set());
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   const toggleCustomer = (customer) =>
     setCollapsedCustomers((prev) => {
       const next = new Set(prev);
       next.has(customer) ? next.delete(customer) : next.add(customer);
+      return next;
+    });
+  const toggleType = (key) =>
+    setCollapsedTypes((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
   const toggleModel = (key) =>
@@ -727,10 +834,9 @@ function DashboardTab({ rows, summary, onEditStock }) {
       return next;
     });
 
-  const [exportModalOpen, setExportModalOpen] = useState(false);
-
   const DASHBOARD_EXPORT_COLUMNS = [
     { header: "고객사", accessor: (r) => r.customer },
+    { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
     { header: "모델명", accessor: (r) => r.model_name },
     { header: "총수주량", accessor: (r) => r.total_order_qty },
     { header: "제품재고", accessor: (r) => r.product_stock },
@@ -743,13 +849,13 @@ function DashboardTab({ rows, summary, onEditStock }) {
 
   const handleExport = (start, end) => {
     const filtered = filterRowsByDateRange(rows, "updated_at", start, end);
-    const filteredGrouped = groupByCustomerAndModel(filtered);
-    exportToExcel("대시보드_현황.xlsx", flattenGrouped(filteredGrouped), DASHBOARD_EXPORT_COLUMNS);
+    const filteredGrouped = groupByCustomerTypeModel(filtered);
+    exportToExcel("대시보드_현황.xlsx", flattenGroupedTyped(filteredGrouped), DASHBOARD_EXPORT_COLUMNS);
   };
 
   return (
     <div className="space-y-6">
-      {/* 상단 요약 카드 (고객사별 + 모델명 breakdown) */}
+      {/* 상단 요약 카드 */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {summary.length === 0 && (
           <div className="col-span-full rounded-lg border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">
@@ -776,15 +882,20 @@ function DashboardTab({ rows, summary, onEditStock }) {
                 <div className="mt-1 font-mono text-lg font-semibold text-amber-400">{formatQty(s.balance)}</div>
               </div>
             </div>
-
-            {/* 모델명 breakdown (볼드 강조) */}
             <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
               {s.models
                 .slice()
-                .sort((a, b) => a.model_name.localeCompare(b.model_name, "ko"))
+                .sort(
+                  (a, b) =>
+                    (TYPE_ORDER[a.product_type] ?? 9) - (TYPE_ORDER[b.product_type] ?? 9) ||
+                    a.model_name.localeCompare(b.model_name, "ko")
+                )
                 .map((m) => (
-                  <div key={m.model_name} className="flex items-center justify-between gap-2 text-xs">
-                    <span className="truncate font-sans text-sm font-bold text-slate-100">{m.model_name}</span>
+                  <div key={`${m.product_type}-${m.model_name}`} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <TypeBadge type={m.product_type} />
+                      <span className="truncate font-sans text-sm font-bold text-slate-100">{m.model_name}</span>
+                    </span>
                     <span className="shrink-0 font-mono text-slate-500">
                       총 {formatQty(m.totalOrder)} · 완료 {formatQty(m.delivered)} · 잔량 {formatQty(m.balance)}
                     </span>
@@ -795,7 +906,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
         ))}
       </div>
 
-      {/* 메인 현황 테이블 : 고객사 → 모델명 2단계 아코디언 */}
+      {/* 메인 현황 테이블 : 고객사 → 구분(Sample/MP) → 모델명 3단계 아코디언 */}
       <div>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-300">모델별 실시간 현황</h2>
@@ -806,7 +917,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
             <table className="w-full min-w-[900px] text-sm">
               <thead>
                 <tr className="border-b border-slate-800 bg-slate-800/50 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
-                  <th className="px-4 py-3">구분</th>
+                  <th className="px-4 py-3 text-left">구분</th>
                   <th className="px-4 py-3 text-right">총수주량</th>
                   <th className="px-4 py-3 text-right">제품재고</th>
                   <th className="px-4 py-3 text-right">재공</th>
@@ -838,47 +949,66 @@ function DashboardTab({ rows, summary, onEditStock }) {
                         </td>
                       </tr>
                       {!collapsedCustomers.has(g.customer) &&
-                        g.models.map((m) => {
-                          const r = m.rows[0];
-                          const modelKey = `${g.customer}::${m.model_name}`;
-                          const modelCollapsed = collapsedModels.has(modelKey);
+                        g.types.map((t) => {
+                          const typeKey = `${g.customer}::${t.type}`;
+                          const typeCollapsed = collapsedTypes.has(typeKey);
                           return (
-                            <React.Fragment key={modelKey}>
+                            <React.Fragment key={typeKey}>
                               <tr>
                                 <td colSpan={9} className="p-0">
-                                  <ModelGroupHeader
-                                    label={m.model_name}
-                                    stats={{
-                                      order_balance: r.order_balance,
-                                      wip_qty: r.wip_qty,
-                                      product_stock: r.product_stock,
-                                    }}
-                                    collapsed={modelCollapsed}
-                                    onToggle={() => toggleModel(modelKey)}
+                                  <TypeGroupHeader
+                                    type={t.type}
+                                    count={t.totalRows}
+                                    collapsed={typeCollapsed}
+                                    onToggle={() => toggleType(typeKey)}
                                   />
                                 </td>
                               </tr>
-                              {!modelCollapsed && (
-                                <tr className="hover:bg-slate-800/40">
-                                  <td className="px-4 py-3 font-sans text-xs text-slate-500">상세 지표</td>
-                                  <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
-                                  <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
-                                  <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
-                                  <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
-                                  <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
-                                  <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
-                                  <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
-                                  <td className="px-4 py-3 text-center font-sans">
-                                    <button
-                                      onClick={() => onEditStock(r)}
-                                      className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
-                                    >
-                                      <Pencil size={12} />
-                                      수정
-                                    </button>
-                                  </td>
-                                </tr>
-                              )}
+                              {!typeCollapsed &&
+                                t.models.map((m) => {
+                                  const r = m.rows[0];
+                                  const modelKey = `${typeKey}::${m.model_name}`;
+                                  const modelCollapsed = collapsedModels.has(modelKey);
+                                  return (
+                                    <React.Fragment key={modelKey}>
+                                      <tr>
+                                        <td colSpan={9} className="p-0">
+                                          <ModelGroupHeader
+                                            label={m.model_name}
+                                            stats={{
+                                              order_balance: r.order_balance,
+                                              wip_qty: r.wip_qty,
+                                              product_stock: r.product_stock,
+                                            }}
+                                            collapsed={modelCollapsed}
+                                            onToggle={() => toggleModel(modelKey)}
+                                          />
+                                        </td>
+                                      </tr>
+                                      {!modelCollapsed && (
+                                        <tr className="hover:bg-slate-800/40">
+                                          <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">상세 지표</td>
+                                          <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
+                                          <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
+                                          <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
+                                          <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
+                                          <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
+                                          <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
+                                          <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
+                                          <td className="px-4 py-3 text-center font-sans">
+                                            <button
+                                              onClick={() => onEditStock(r)}
+                                              className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
+                                            >
+                                              <Pencil size={12} />
+                                              수정
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </React.Fragment>
+                                  );
+                                })}
                             </React.Fragment>
                           );
                         })}
@@ -902,11 +1032,12 @@ function DashboardTab({ rows, summary, onEditStock }) {
 }
 
 /* =========================================================================
-   내역 조회 탭 공용: 고객사(1단계) → 모델명(2단계) 아코디언 + 엑셀 내보내기
+   내역 조회 탭 공용: 고객사(1) → 구분(2) → 모델명(3) 아코디언 + 기간필터 엑셀
    ========================================================================= */
 function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, exportConfig, productLookup }) {
-  const grouped = useMemo(() => groupByCustomerAndModel(rows, dateField), [rows, dateField]);
+  const grouped = useMemo(() => groupByCustomerTypeModel(rows, dateField), [rows, dateField]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
+  const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
   const [collapsedModels, setCollapsedModels] = useState(() => new Set());
   const [exportModalOpen, setExportModalOpen] = useState(false);
 
@@ -914,6 +1045,12 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
     setCollapsedCustomers((prev) => {
       const next = new Set(prev);
       next.has(customer) ? next.delete(customer) : next.add(customer);
+      return next;
+    });
+  const toggleType = (key) =>
+    setCollapsedTypes((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
   const toggleModel = (key) =>
@@ -925,8 +1062,8 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
 
   const handleExport = (start, end) => {
     const filtered = filterRowsByDateRange(rows, dateField, start, end);
-    const filteredGrouped = groupByCustomerAndModel(filtered, dateField);
-    exportToExcel(exportConfig.filename, flattenGrouped(filteredGrouped), exportConfig.columns);
+    const filteredGrouped = groupByCustomerTypeModel(filtered, dateField);
+    exportToExcel(exportConfig.filename, flattenGroupedTyped(filteredGrouped), exportConfig.columns);
   };
 
   return (
@@ -969,24 +1106,43 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
                       </td>
                     </tr>
                     {!collapsedCustomers.has(g.customer) &&
-                      g.models.map((m) => {
-                        const modelKey = `${g.customer}::${m.model_name}`;
-                        const modelCollapsed = collapsedModels.has(modelKey);
-                        const stats = productLookup?.get(modelKey);
+                      g.types.map((t) => {
+                        const typeKey = `${g.customer}::${t.type}`;
+                        const typeCollapsed = collapsedTypes.has(typeKey);
                         return (
-                          <React.Fragment key={modelKey}>
+                          <React.Fragment key={typeKey}>
                             <tr>
                               <td colSpan={columns.length} className="p-0">
-                                <ModelGroupHeader
-                                  label={m.model_name}
-                                  count={m.rows.length}
-                                  stats={stats}
-                                  collapsed={modelCollapsed}
-                                  onToggle={() => toggleModel(modelKey)}
+                                <TypeGroupHeader
+                                  type={t.type}
+                                  count={t.totalRows}
+                                  collapsed={typeCollapsed}
+                                  onToggle={() => toggleType(typeKey)}
                                 />
                               </td>
                             </tr>
-                            {!modelCollapsed && m.rows.map(renderRow)}
+                            {!typeCollapsed &&
+                              t.models.map((m) => {
+                                const modelKey = `${typeKey}::${m.model_name}`;
+                                const modelCollapsed = collapsedModels.has(modelKey);
+                                const stats = productLookup?.get(modelKey);
+                                return (
+                                  <React.Fragment key={modelKey}>
+                                    <tr>
+                                      <td colSpan={columns.length} className="p-0">
+                                        <ModelGroupHeader
+                                          label={m.model_name}
+                                          count={m.rows.length}
+                                          stats={stats}
+                                          collapsed={modelCollapsed}
+                                          onToggle={() => toggleModel(modelKey)}
+                                        />
+                                      </td>
+                                    </tr>
+                                    {!modelCollapsed && m.rows.map(renderRow)}
+                                  </React.Fragment>
+                                );
+                              })}
                           </React.Fragment>
                         );
                       })}
@@ -1012,11 +1168,7 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
 
 function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
-    const ok = await deleteRecord(
-      "sales_orders",
-      row.id,
-      `${row.customer} / ${row.model_name} 수주 내역을 삭제할까요?`
-    );
+    const ok = await deleteRecord("sales_orders", row.id, `${row.customer} / ${row.model_name} 수주 내역을 삭제할까요?`);
     if (ok) onRefresh();
   };
 
@@ -1024,6 +1176,7 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
     <GroupedHistoryTable
       columns={[
         { label: "제조사", align: "left" },
+        { label: "리비전", align: "left" },
         { label: "수주일", align: "center" },
         { label: "수량", align: "right" },
         { label: "작업", align: "center" },
@@ -1037,7 +1190,9 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
         dateHint: "수주일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
+          { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
           { header: "모델명", accessor: (r) => r.model_name },
+          { header: "리비전", accessor: (r) => r.revision || "" },
           { header: "제조사", accessor: (r) => r.manufacturer || "" },
           { header: "수량", accessor: (r) => r.quantity },
           { header: "수주일", accessor: (r) => r.order_date },
@@ -1046,6 +1201,7 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
           <td className="px-4 py-3 text-left text-slate-400">{r.manufacturer || "-"}</td>
+          <td className="px-4 py-3 text-left text-slate-400">{r.revision || "-"}</td>
           <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.order_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
           <td className="px-4 py-3 text-center">
@@ -1071,6 +1227,7 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
     <GroupedHistoryTable
       columns={[
         { label: "제조사", align: "left" },
+        { label: "리비전", align: "left" },
         { label: "출고일", align: "center" },
         { label: "수량", align: "right" },
         { label: "매입가", align: "right" },
@@ -1086,7 +1243,9 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
         dateHint: "출고일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
+          { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
           { header: "모델명", accessor: (r) => r.model_name },
+          { header: "리비전", accessor: (r) => r.revision || "" },
           { header: "제조사", accessor: (r) => r.manufacturer || "" },
           { header: "수량", accessor: (r) => r.quantity },
           { header: "매입가", accessor: (r) => r.purchase_price },
@@ -1099,6 +1258,7 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
           <td className="px-4 py-3 text-left text-slate-400">{r.manufacturer || "-"}</td>
+          <td className="px-4 py-3 text-left text-slate-400">{r.revision || "-"}</td>
           <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
@@ -1112,7 +1272,6 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   );
 }
 
-// 원자재 발주 행: 입고(도착) 수량을 직접 입력하는 부분입고 인라인 편집 포함
 function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
   const [receivedInput, setReceivedInput] = useState(String(row.received_qty ?? 0));
 
@@ -1212,6 +1371,7 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
         dateHint: "발주일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
+          { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
           { header: "모델명", accessor: (r) => r.model_name },
           { header: "원자재 Maker", accessor: (r) => r.material_maker || "" },
           { header: "발주일", accessor: (r) => r.order_date },
@@ -1222,13 +1382,7 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
         ],
       }}
       renderRow={(r) => (
-        <MaterialRowCells
-          key={r.id}
-          row={r}
-          onSaveReceived={handleSaveReceived}
-          onEdit={onEdit}
-          onDelete={handleDelete}
-        />
+        <MaterialRowCells key={r.id} row={r} onSaveReceived={handleSaveReceived} onEdit={onEdit} onDelete={handleDelete} />
       )}
     />
   );
@@ -1247,6 +1401,7 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   return (
     <GroupedHistoryTable
       columns={[
+        { label: "리비전", align: "left" },
         { label: "적용일", align: "center" },
         { label: "매입가", align: "right" },
         { label: "판매가", align: "right" },
@@ -1262,7 +1417,9 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
         dateHint: "적용일 기준으로 필터링합니다.",
         columns: [
           { header: "고객사", accessor: (r) => r.customer },
+          { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
           { header: "모델명", accessor: (r) => r.model_name },
+          { header: "리비전", accessor: (r) => r.revision || "" },
           { header: "적용일", accessor: (r) => r.effective_date },
           { header: "매입가", accessor: (r) => r.purchase_price },
           { header: "매입통화", accessor: (r) => r.purchase_currency },
@@ -1273,6 +1430,7 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       }}
       renderRow={(r) => (
         <tr key={r.id} className="hover:bg-slate-800/40">
+          <td className="px-4 py-3 text-left text-slate-400">{r.revision || "-"}</td>
           <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.effective_date)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
           <td className="px-4 py-3 text-right font-mono">{formatPrice(r.sale_price, r.sale_currency)}</td>
@@ -1298,13 +1456,49 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
 }
 
 /* =========================================================================
-   ① 수주 입력 / 수정 모달 (단가 필드 없음)
+   계층형 카탈로그 훅 — 고객사 → 제조사 → 모델명(구분별) 옵션 계산
    ========================================================================= */
-function SalesOrderModal({ open, onClose, editing }) {
+function useCatalogOptions(catalog, customer, manufacturer, productType) {
+  const customerOptions = useMemo(
+    () => Array.from(new Set(catalog.map((c) => c.customer))).sort((a, b) => a.localeCompare(b, "ko")),
+    [catalog]
+  );
+  const manufacturerOptions = useMemo(
+    () =>
+      Array.from(new Set(catalog.filter((c) => c.customer === customer && c.manufacturer).map((c) => c.manufacturer))).sort(
+        (a, b) => a.localeCompare(b, "ko")
+      ),
+    [catalog, customer]
+  );
+  const modelOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          catalog
+            .filter(
+              (c) =>
+                c.customer === customer &&
+                c.product_type === productType &&
+                (!manufacturer || c.manufacturer === manufacturer)
+            )
+            .map((c) => c.model_name)
+        )
+      ).sort((a, b) => a.localeCompare(b, "ko")),
+    [catalog, customer, manufacturer, productType]
+  );
+  return { customerOptions, manufacturerOptions, modelOptions };
+}
+
+/* =========================================================================
+   ① 수주 입력 / 수정 모달
+   ========================================================================= */
+function SalesOrderModal({ open, onClose, editing, catalog }) {
   const emptyForm = {
+    product_type: "mp",
     model_name: "",
     customer: "",
     manufacturer: "",
+    revision: "",
     quantity: "",
     order_date: todayStr(),
   };
@@ -1315,9 +1509,11 @@ function SalesOrderModal({ open, onClose, editing }) {
     if (!open) return;
     if (editing) {
       setForm({
+        product_type: editing.product_type || "mp",
         model_name: editing.model_name || "",
         customer: editing.customer || "",
         manufacturer: editing.manufacturer || "",
+        revision: editing.revision || "",
         quantity: String(editing.quantity ?? ""),
         order_date: editing.order_date || todayStr(),
       });
@@ -1328,6 +1524,12 @@ function SalesOrderModal({ open, onClose, editing }) {
   }, [open, editing]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const { customerOptions, manufacturerOptions, modelOptions } = useCatalogOptions(
+    catalog,
+    form.customer,
+    form.manufacturer,
+    form.product_type
+  );
 
   const submit = async () => {
     if (!form.model_name || !form.customer || !form.quantity) {
@@ -1336,9 +1538,11 @@ function SalesOrderModal({ open, onClose, editing }) {
     }
     setSaving(true);
     const payload = {
+      product_type: form.product_type,
       model_name: form.model_name,
       customer: form.customer,
       manufacturer: form.manufacturer || null,
+      revision: form.product_type === "sample" ? form.revision || null : null,
       quantity: Number(form.quantity),
       order_date: form.order_date,
     };
@@ -1353,21 +1557,70 @@ function SalesOrderModal({ open, onClose, editing }) {
 
   return (
     <Modal open={open} title={editing ? "수주 내역 수정" : "수주 입력"} onClose={onClose}>
-      <Field label="모델명">
-        <input className={inputClass} value={form.model_name} onChange={set("model_name")} />
-      </Field>
-      <Field label="고객사">
-        <input className={inputClass} value={form.customer} onChange={set("customer")} />
-      </Field>
-      <Field label="제조사">
-        <input className={inputClass} value={form.manufacturer} onChange={set("manufacturer")} />
-      </Field>
+      <ProductTypeToggle value={form.product_type} onChange={(v) => setForm((f) => ({ ...f, product_type: v, model_name: "" }))} />
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="고객사">
+          <HierarchicalSelect
+            value={form.customer}
+            onChange={(v) => setForm((f) => ({ ...f, customer: v, manufacturer: "", model_name: "" }))}
+            options={customerOptions}
+            addLabel="+ 고객사 추가"
+            resetKey={editing?.id || "new-sales"}
+          />
+        </Field>
+        <Field label="제조사">
+          <HierarchicalSelect
+            value={form.manufacturer}
+            onChange={(v) => setForm((f) => ({ ...f, manufacturer: v, model_name: "" }))}
+            options={manufacturerOptions}
+            addLabel="+ 제조사 추가"
+            resetKey={form.customer}
+          />
+        </Field>
+      </div>
+
+      {form.product_type === "sample" ? (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="모델명">
+            <HierarchicalSelect
+              value={form.model_name}
+              onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+              options={modelOptions}
+              addLabel="+ 모델명 추가"
+              resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+            />
+          </Field>
+          <Field label="리비전">
+            <input className={inputClass} value={form.revision} onChange={set("revision")} placeholder="예: Rev.A, v2" />
+          </Field>
+        </div>
+      ) : (
+        <Field label="모델명">
+          <HierarchicalSelect
+            value={form.model_name}
+            onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+            options={modelOptions}
+            addLabel="+ 모델명 추가"
+            resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+          />
+        </Field>
+      )}
+
       <Field label="수량">
         <input type="number" min="0" className={inputClass} value={form.quantity} onChange={set("quantity")} />
       </Field>
       <Field label="수주일">
         <input type="date" className={inputClass} value={form.order_date} onChange={set("order_date")} />
       </Field>
+
+      {form.product_type === "sample" && (
+        <p className="mb-2 rounded-md bg-purple-500/10 p-2.5 text-xs text-purple-300">
+          Sample은 리비전이 달라도 동일 프로젝트로 간주되어, 원자재 재고·누적 수주량·대시보드 통계가 모델명 기준으로 통합
+          집계됩니다. 리비전은 이력 식별용으로만 사용됩니다.
+        </p>
+      )}
+
       <div className="mt-4 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
           취소
@@ -1381,13 +1634,15 @@ function SalesOrderModal({ open, onClose, editing }) {
 }
 
 /* =========================================================================
-   ② 출고 입력 / 수정 모달 (매입가/판매가 각각 별도 통화)
+   ② 출고 입력 / 수정 모달 (매입가/판매가 자동완성 포함)
    ========================================================================= */
-function ShipmentModal({ open, onClose, editing }) {
+function ShipmentModal({ open, onClose, editing, catalog }) {
   const emptyForm = {
+    product_type: "mp",
     model_name: "",
     customer: "",
     manufacturer: "",
+    revision: "",
     quantity: "",
     purchase_currency: "USD",
     purchase_price: "",
@@ -1402,9 +1657,11 @@ function ShipmentModal({ open, onClose, editing }) {
     if (!open) return;
     if (editing) {
       setForm({
+        product_type: editing.product_type || "mp",
         model_name: editing.model_name || "",
         customer: editing.customer || "",
         manufacturer: editing.manufacturer || "",
+        revision: editing.revision || "",
         quantity: String(editing.quantity ?? ""),
         purchase_currency: editing.purchase_currency || "USD",
         purchase_price: editing.purchase_price === null || editing.purchase_price === undefined ? "" : String(editing.purchase_price),
@@ -1419,6 +1676,47 @@ function ShipmentModal({ open, onClose, editing }) {
   }, [open, editing]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const { customerOptions, manufacturerOptions, modelOptions } = useCatalogOptions(
+    catalog,
+    form.customer,
+    form.manufacturer,
+    form.product_type
+  );
+
+  // 신규 등록 시에만: 모델명이 정해지면 최근 매입가/판매가를 자동으로 불러옴 (수정은 자유롭게 가능)
+  useEffect(() => {
+    if (editing) return;
+    if (!open) return;
+    if (!form.customer || !form.model_name) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const { data, error } = await supabase
+        .from("shipments")
+        .select("purchase_price, purchase_currency, sale_price, sale_currency")
+        .eq("customer", form.customer)
+        .eq("model_name", form.model_name)
+        .eq("product_type", form.product_type)
+        .order("shipment_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!cancelled && !error && data) {
+        setForm((f) => ({
+          ...f,
+          purchase_price: String(data.purchase_price),
+          purchase_currency: data.purchase_currency,
+          sale_price: String(data.sale_price),
+          sale_currency: data.sale_currency,
+        }));
+        notifyToast("success", "최근 매입가/판매가를 자동으로 불러왔습니다. 필요 시 수정하세요.");
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.customer, form.model_name, form.product_type, editing, open]);
 
   const submit = async () => {
     if (!form.model_name || !form.customer || !form.quantity || form.purchase_price === "" || form.sale_price === "") {
@@ -1427,9 +1725,11 @@ function ShipmentModal({ open, onClose, editing }) {
     }
     setSaving(true);
     const payload = {
+      product_type: form.product_type,
       model_name: form.model_name,
       customer: form.customer,
       manufacturer: form.manufacturer || null,
+      revision: form.product_type === "sample" ? form.revision || null : null,
       quantity: Number(form.quantity),
       purchase_currency: form.purchase_currency,
       purchase_price: Number(form.purchase_price),
@@ -1448,15 +1748,56 @@ function ShipmentModal({ open, onClose, editing }) {
 
   return (
     <Modal open={open} title={editing ? "출고 내역 수정" : "출고 입력"} onClose={onClose}>
-      <Field label="모델명">
-        <input className={inputClass} value={form.model_name} onChange={set("model_name")} />
-      </Field>
-      <Field label="고객사">
-        <input className={inputClass} value={form.customer} onChange={set("customer")} />
-      </Field>
-      <Field label="제조사">
-        <input className={inputClass} value={form.manufacturer} onChange={set("manufacturer")} />
-      </Field>
+      <ProductTypeToggle value={form.product_type} onChange={(v) => setForm((f) => ({ ...f, product_type: v, model_name: "" }))} />
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="고객사">
+          <HierarchicalSelect
+            value={form.customer}
+            onChange={(v) => setForm((f) => ({ ...f, customer: v, manufacturer: "", model_name: "" }))}
+            options={customerOptions}
+            addLabel="+ 고객사 추가"
+            resetKey={editing?.id || "new-shipment"}
+          />
+        </Field>
+        <Field label="제조사">
+          <HierarchicalSelect
+            value={form.manufacturer}
+            onChange={(v) => setForm((f) => ({ ...f, manufacturer: v, model_name: "" }))}
+            options={manufacturerOptions}
+            addLabel="+ 제조사 추가"
+            resetKey={form.customer}
+          />
+        </Field>
+      </div>
+
+      {form.product_type === "sample" ? (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="모델명">
+            <HierarchicalSelect
+              value={form.model_name}
+              onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+              options={modelOptions}
+              addLabel="+ 모델명 추가"
+              resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+            />
+          </Field>
+          <Field label="리비전">
+            <input className={inputClass} value={form.revision} onChange={set("revision")} placeholder="예: Rev.A, v2" />
+          </Field>
+        </div>
+      ) : (
+        <Field label="모델명">
+          <HierarchicalSelect
+            value={form.model_name}
+            onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+            options={modelOptions}
+            addLabel="+ 모델명 추가"
+            resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+          />
+        </Field>
+      )}
+
       <Field label="수량">
         <input type="number" min="0" className={inputClass} value={form.quantity} onChange={set("quantity")} />
       </Field>
@@ -1480,7 +1821,8 @@ function ShipmentModal({ open, onClose, editing }) {
         <input type="date" className={inputClass} value={form.shipment_date} onChange={set("shipment_date")} />
       </Field>
       <p className="mb-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
-        매입가와 판매가는 서로 다른 통화로 입력할 수 있습니다 (예: 매입 USD / 판매 KRW). 신규 등록 시 단가 이력(단가 이력 탭)에 자동 기록되며, 이후 이 출고 내역을 수정하면 연결된 단가 이력도 함께 갱신됩니다.
+        모델명을 선택/입력하면 해당 모델의 가장 최근 매입가·판매가가 자동으로 채워집니다 (신규 등록 시에만, 자유롭게
+        수정 가능). 매입가와 판매가는 서로 다른 통화로 입력할 수 있습니다. 등록/수정 시 단가 이력에도 자동 동기화됩니다.
       </p>
       <div className="mt-2 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
@@ -1495,13 +1837,15 @@ function ShipmentModal({ open, onClose, editing }) {
 }
 
 /* =========================================================================
-   ③ 원자재 발주 입력 / 수정 모달 (입고수량 직접 입력 — 부분입고 지원)
+   ③ 원자재 발주 입력 / 수정 모달
    ========================================================================= */
-function MaterialOrderModal({ open, onClose, editing }) {
+function MaterialOrderModal({ open, onClose, editing, catalog }) {
   const emptyForm = {
+    product_type: "mp",
     model_name: "",
     material_maker: "",
     customer: "",
+    manufacturer: "",
     quantity: "",
     order_date: todayStr(),
     received_qty: "0",
@@ -1513,9 +1857,11 @@ function MaterialOrderModal({ open, onClose, editing }) {
     if (!open) return;
     if (editing) {
       setForm({
+        product_type: editing.product_type || "mp",
         model_name: editing.model_name || "",
         material_maker: editing.material_maker || "",
         customer: editing.customer || "",
+        manufacturer: editing.manufacturer || "",
         quantity: String(editing.quantity ?? ""),
         order_date: editing.order_date || todayStr(),
         received_qty: String(editing.received_qty ?? 0),
@@ -1527,6 +1873,12 @@ function MaterialOrderModal({ open, onClose, editing }) {
   }, [open, editing]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const { customerOptions, manufacturerOptions, modelOptions } = useCatalogOptions(
+    catalog,
+    form.customer,
+    form.manufacturer,
+    form.product_type
+  );
 
   const quantityNum = Number(form.quantity) || 0;
   const receivedNum = Math.min(Math.max(0, Number(form.received_qty) || 0), quantityNum || Number(form.received_qty) || 0);
@@ -1539,6 +1891,7 @@ function MaterialOrderModal({ open, onClose, editing }) {
     }
     setSaving(true);
     const payload = {
+      product_type: form.product_type,
       model_name: form.model_name,
       material_maker: form.material_maker || null,
       customer: form.customer,
@@ -1557,14 +1910,41 @@ function MaterialOrderModal({ open, onClose, editing }) {
 
   return (
     <Modal open={open} title={editing ? "원자재 발주 내역 수정" : "원자재 발주 입력"} onClose={onClose}>
+      <ProductTypeToggle value={form.product_type} onChange={(v) => setForm((f) => ({ ...f, product_type: v, model_name: "" }))} />
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="고객사">
+          <HierarchicalSelect
+            value={form.customer}
+            onChange={(v) => setForm((f) => ({ ...f, customer: v, manufacturer: "", model_name: "" }))}
+            options={customerOptions}
+            addLabel="+ 고객사 추가"
+            resetKey={editing?.id || "new-material"}
+          />
+        </Field>
+        <Field label="제조사">
+          <HierarchicalSelect
+            value={form.manufacturer}
+            onChange={(v) => setForm((f) => ({ ...f, manufacturer: v, model_name: "" }))}
+            options={manufacturerOptions}
+            addLabel="+ 제조사 추가"
+            resetKey={form.customer}
+          />
+        </Field>
+      </div>
+
       <Field label="모델명">
-        <input className={inputClass} value={form.model_name} onChange={set("model_name")} />
+        <HierarchicalSelect
+          value={form.model_name}
+          onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+          options={modelOptions}
+          addLabel="+ 모델명 추가"
+          resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+        />
       </Field>
+
       <Field label="원자재 Maker">
         <input className={inputClass} value={form.material_maker} onChange={set("material_maker")} />
-      </Field>
-      <Field label="고객사">
-        <input className={inputClass} value={form.customer} onChange={set("customer")} />
       </Field>
       <Field label="발주 수량">
         <input type="number" min="0" className={inputClass} value={form.quantity} onChange={set("quantity")} />
@@ -1583,7 +1963,8 @@ function MaterialOrderModal({ open, onClose, editing }) {
         />
       </Field>
       <p className="mb-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
-        발주 {formatQty(quantityNum)}개 중 입고 {formatQty(receivedNum)}개 → 대기(미입고) {formatQty(pendingNum)}개로 자동 계산됩니다. 부분 입고 시에는 도착한 수량만큼만 입력하세요.
+        발주 {formatQty(quantityNum)}개 중 입고 {formatQty(receivedNum)}개 → 대기(미입고) {formatQty(pendingNum)}개로 자동
+        계산됩니다.
       </p>
       <div className="mt-2 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
@@ -1598,7 +1979,7 @@ function MaterialOrderModal({ open, onClose, editing }) {
 }
 
 /* =========================================================================
-   ④ 재공 / 제품재고 수정 모달
+   ④ 재공 / 제품재고 수정 모달 (모델 선택 시 Sample/MP 뱃지 표시)
    ========================================================================= */
 function StockEditModal({ open, onClose, products, initial }) {
   const [selectedId, setSelectedId] = useState("");
@@ -1644,12 +2025,12 @@ function StockEditModal({ open, onClose, products, initial }) {
 
   return (
     <Modal open={open} title="재공 / 제품재고 수정" onClose={onClose}>
-      <Field label="모델 선택 (고객사 - 모델명)">
+      <Field label="모델 선택 (고객사 - 구분 - 모델명)">
         <select className={inputClass} value={selectedId} onChange={(e) => onSelectProduct(e.target.value)}>
           <option value="">모델을 선택하세요</option>
           {products.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.customer} - {p.model_name}
+              {p.customer} - {TYPE_LABEL[p.product_type] || p.product_type} - {p.model_name}
             </option>
           ))}
         </select>
@@ -1677,12 +2058,15 @@ function StockEditModal({ open, onClose, products, initial }) {
 }
 
 /* =========================================================================
-   ⑤ 단가 이력 추가 / 수정 모달 (수동 입력, 매입/판매 각각 별도 통화)
+   ⑤ 단가 이력 추가 / 수정 모달 (수동 입력)
    ========================================================================= */
-function PriceHistoryModal({ open, onClose, editing }) {
+function PriceHistoryModal({ open, onClose, editing, catalog }) {
   const emptyForm = {
+    product_type: "mp",
     model_name: "",
     customer: "",
+    manufacturer: "",
+    revision: "",
     purchase_currency: "USD",
     purchase_price: "",
     sale_currency: "KRW",
@@ -1697,8 +2081,11 @@ function PriceHistoryModal({ open, onClose, editing }) {
     if (!open) return;
     if (editing) {
       setForm({
+        product_type: editing.product_type || "mp",
         model_name: editing.model_name || "",
         customer: editing.customer || "",
+        manufacturer: editing.manufacturer || "",
+        revision: editing.revision || "",
         purchase_currency: editing.purchase_currency || "USD",
         purchase_price: editing.purchase_price === null || editing.purchase_price === undefined ? "" : String(editing.purchase_price),
         sale_currency: editing.sale_currency || "KRW",
@@ -1713,6 +2100,12 @@ function PriceHistoryModal({ open, onClose, editing }) {
   }, [open, editing]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const { customerOptions, manufacturerOptions, modelOptions } = useCatalogOptions(
+    catalog,
+    form.customer,
+    form.manufacturer,
+    form.product_type
+  );
 
   const submit = async () => {
     if (!form.model_name || !form.customer) {
@@ -1721,8 +2114,10 @@ function PriceHistoryModal({ open, onClose, editing }) {
     }
     setSaving(true);
     const payload = {
+      product_type: form.product_type,
       model_name: form.model_name,
       customer: form.customer,
+      revision: form.product_type === "sample" ? form.revision || null : null,
       purchase_currency: form.purchase_currency,
       purchase_price: form.purchase_price === "" ? null : Number(form.purchase_price),
       sale_currency: form.sale_currency,
@@ -1741,12 +2136,56 @@ function PriceHistoryModal({ open, onClose, editing }) {
 
   return (
     <Modal open={open} title={editing ? "단가 이력 수정" : "단가 이력 추가"} onClose={onClose}>
-      <Field label="모델명">
-        <input className={inputClass} value={form.model_name} onChange={set("model_name")} />
-      </Field>
-      <Field label="고객사">
-        <input className={inputClass} value={form.customer} onChange={set("customer")} />
-      </Field>
+      <ProductTypeToggle value={form.product_type} onChange={(v) => setForm((f) => ({ ...f, product_type: v, model_name: "" }))} />
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="고객사">
+          <HierarchicalSelect
+            value={form.customer}
+            onChange={(v) => setForm((f) => ({ ...f, customer: v, manufacturer: "", model_name: "" }))}
+            options={customerOptions}
+            addLabel="+ 고객사 추가"
+            resetKey={editing?.id || "new-price"}
+          />
+        </Field>
+        <Field label="제조사">
+          <HierarchicalSelect
+            value={form.manufacturer}
+            onChange={(v) => setForm((f) => ({ ...f, manufacturer: v, model_name: "" }))}
+            options={manufacturerOptions}
+            addLabel="+ 제조사 추가"
+            resetKey={form.customer}
+          />
+        </Field>
+      </div>
+
+      {form.product_type === "sample" ? (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="모델명">
+            <HierarchicalSelect
+              value={form.model_name}
+              onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+              options={modelOptions}
+              addLabel="+ 모델명 추가"
+              resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+            />
+          </Field>
+          <Field label="리비전">
+            <input className={inputClass} value={form.revision} onChange={set("revision")} placeholder="예: Rev.A, v2" />
+          </Field>
+        </div>
+      ) : (
+        <Field label="모델명">
+          <HierarchicalSelect
+            value={form.model_name}
+            onChange={(v) => setForm((f) => ({ ...f, model_name: v }))}
+            options={modelOptions}
+            addLabel="+ 모델명 추가"
+            resetKey={`${form.customer}|${form.manufacturer}|${form.product_type}`}
+          />
+        </Field>
+      )}
+
       <Field label="매입가 (통화 3 : 금액 7)">
         <CurrencyPriceInput
           price={form.purchase_price}
@@ -1771,7 +2210,8 @@ function PriceHistoryModal({ open, onClose, editing }) {
       </Field>
       {editing && editing.source === "shipment" && (
         <p className="mb-2 rounded-md bg-cyan-500/10 p-2.5 text-xs text-cyan-300">
-          이 이력은 출고 내역에서 자동 기록되었습니다. 여기서 수정하면 연결된 출고 내역의 매입가/판매가도 동일하게 갱신되고, 삭제하면 연결된 출고 내역도 함께 삭제됩니다.
+          이 이력은 출고 내역에서 자동 기록되었습니다. 여기서 수정하면 연결된 출고 내역의 매입가/판매가도 동일하게
+          갱신되고, 삭제하면 연결된 출고 내역도 함께 삭제됩니다.
         </p>
       )}
       <div className="mt-4 flex justify-end gap-2">
