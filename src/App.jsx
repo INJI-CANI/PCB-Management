@@ -24,6 +24,7 @@ import {
   CheckCircle2,
   FlaskConical,
   Factory,
+  TrendingUp,
 } from "lucide-react";
 
 /* =========================================================================
@@ -744,6 +745,7 @@ export default function App() {
             { key: "shipment", label: "출고 내역", icon: Truck },
             { key: "material", label: "원자재 발주 내역", icon: Boxes },
             { key: "price_history", label: "단가 이력", icon: History },
+            { key: "profit", label: "이익 현황", icon: TrendingUp },
           ].map((t) => (
             <button
               key={t.key}
@@ -786,8 +788,8 @@ export default function App() {
           <DashboardTab
             rows={dashboardRows}
             summary={summaryByCustomer}
+            shipmentRows={shipmentRows}
             revisionsByModel={revisionsByModel}
-            onEditStock={(row) => openEdit("stock", row)}
           />
         )}
         {tab === "sales" && (
@@ -822,6 +824,7 @@ export default function App() {
             onRefresh={fetchPriceHistory}
           />
         )}
+        {tab === "profit" && <ProfitTab rows={shipmentRows} />}
       </main>
 
       <SalesOrderModal open={modal === "sales"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
@@ -838,12 +841,41 @@ export default function App() {
 /* =========================================================================
    대시보드 탭 (고객사 → 구분 → 모델명 3단계 아코디언 + 기간필터 엑셀)
    ========================================================================= */
-function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
+function DashboardTab({ rows, summary, shipmentRows, revisionsByModel }) {
   const grouped = useMemo(() => groupByCustomerTypeModel(rows), [rows]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
   const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
   const [collapsedModels, setCollapsedModels] = useState(() => new Set());
   const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  const currentYear = new Date().getFullYear();
+  const [selectedYear, setSelectedYear] = useState(currentYear);
+
+  const yearOptions = useMemo(() => {
+    const years = new Set([currentYear]);
+    shipmentRows.forEach((r) => {
+      const y = Number((r.shipment_date || "").slice(0, 4));
+      if (y) years.add(y);
+    });
+    return Array.from(years).sort((a, b) => b - a);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shipmentRows]);
+
+  const profitByCustomer = useMemo(() => {
+    const map = new Map();
+    for (const r of shipmentRows) {
+      const y = Number((r.shipment_date || "").slice(0, 4));
+      if (y !== selectedYear) continue;
+      if (!map.has(r.customer)) map.set(r.customer, { totalPurchase: 0, totalSale: 0, totalExtra: 0 });
+      const cur = map.get(r.customer);
+      cur.totalPurchase += Number(r.quantity || 0) * Number(r.purchase_price || 0);
+      cur.totalSale += Number(r.quantity || 0) * Number(r.sale_price || 0);
+      cur.totalExtra += Number(r.extra_cost || 0);
+    }
+    const result = new Map();
+    for (const [k, v] of map) result.set(k, { ...v, margin: v.totalSale - v.totalPurchase - v.totalExtra });
+    return result;
+  }, [shipmentRows, selectedYear]);
 
   const toggleCustomer = (customer) =>
     setCollapsedCustomers((prev) => {
@@ -885,16 +917,39 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
 
   return (
     <div className="space-y-6">
-      {/* 상단 요약 카드 (고객사별, 2-Track 정보 전환) */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {summary.length === 0 && (
-          <div className="col-span-full rounded-lg border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">
-            아직 등록된 데이터가 없습니다. 상단 버튼으로 수주/출고/원자재 발주를 입력해보세요.
-          </div>
-        )}
-        {summary.map((s) => (
-          <CustomerSummaryCard key={s.customer} summary={s} revisionsByModel={revisionsByModel} />
-        ))}
+      {/* 상단 요약 카드 (고객사별, 이익현황 기준 + 2-Track 재고 전환) */}
+      <div>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-slate-300">고객사별 요약 ({selectedYear}년 기준)</h2>
+          <Field label="">
+            <select
+              value={selectedYear}
+              onChange={(e) => setSelectedYear(Number(e.target.value))}
+              className={`${inputClass} w-32`}
+            >
+              {yearOptions.map((y) => (
+                <option key={y} value={y}>
+                  {y}년
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {summary.length === 0 && (
+            <div className="col-span-full rounded-lg border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">
+              아직 등록된 데이터가 없습니다. 상단 버튼으로 수주/출고/원자재 발주를 입력해보세요.
+            </div>
+          )}
+          {summary.map((s) => (
+            <CustomerSummaryCard
+              key={s.customer}
+              summary={s}
+              profit={profitByCustomer.get(s.customer)}
+              revisionsByModel={revisionsByModel}
+            />
+          ))}
+        </div>
       </div>
 
       {/* 메인 현황 테이블 : 고객사 → 구분(Sample/MP) → 모델명 3단계 아코디언 */}
@@ -916,13 +971,12 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
                   <th className="px-4 py-3 text-right">발주잔량</th>
                   <th className="px-4 py-3 text-right">원자재재고</th>
                   <th className="px-4 py-3 text-right">원자재대기</th>
-                  <th className="px-4 py-3 text-center">관리</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/70 font-mono">
                 {grouped.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-10 text-center font-sans text-slate-500">
+                    <td colSpan={8} className="px-4 py-10 text-center font-sans text-slate-500">
                       표시할 모델 데이터가 없습니다.
                     </td>
                   </tr>
@@ -930,7 +984,7 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
                   grouped.map((g) => (
                     <React.Fragment key={g.customer}>
                       <tr>
-                        <td colSpan={9} className="p-0">
+                        <td colSpan={8} className="p-0">
                           <GroupHeader
                             label={g.customer}
                             count={g.totalRows}
@@ -946,7 +1000,7 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
                           return (
                             <React.Fragment key={typeKey}>
                               <tr>
-                                <td colSpan={9} className="p-0">
+                                <td colSpan={8} className="p-0">
                                   <TypeGroupHeader
                                     type={t.type}
                                     count={t.totalRows}
@@ -963,7 +1017,7 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
                                   return (
                                     <React.Fragment key={modelKey}>
                                       <tr>
-                                        <td colSpan={9} className="p-0">
+                                        <td colSpan={8} className="p-0">
                                           <ModelGroupHeader
                                             label={m.model_name}
                                             revisions={t.type === "sample" ? revisionsByModel?.get(modelKey) : undefined}
@@ -977,7 +1031,7 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
                                           />
                                         </td>
                                       </tr>
-                                      {!modelCollapsed && <DashboardDetailRow row={r} onEditStock={onEditStock} />}
+                                      {!modelCollapsed && <DashboardDetailRow row={r} />}
                                     </React.Fragment>
                                   );
                                 })}
@@ -1003,8 +1057,8 @@ function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
   );
 }
 
-// 고객사 요약 카드: [원자재 현황] / [발주잔량 현황] 2-Track 전환
-function CustomerSummaryCard({ summary: s, revisionsByModel }) {
+// 고객사 요약 카드: 상단 이익현황(매입/판매/부대비용/이익) + 하단 [원자재 현황]/[발주잔량 현황] 2-Track 전환
+function CustomerSummaryCard({ summary: s, profit, revisionsByModel }) {
   const [viewMode, setViewMode] = useState("material"); // 'material' | 'balance'
 
   const sortedModels = useMemo(
@@ -1046,20 +1100,39 @@ function CustomerSummaryCard({ summary: s, revisionsByModel }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3 text-center">
+      <div className="grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
         <div>
-          <div className="text-[11px] text-slate-500">총 수주량</div>
-          <div className="mt-1 font-mono text-lg font-semibold text-slate-100">{formatQty(s.totalOrder)}</div>
+          <div className="text-[11px] text-slate-500">총 매입가</div>
+          <div className="mt-1 font-mono text-base font-semibold text-slate-100">
+            {formatQty(Math.round(profit?.totalPurchase || 0))}
+          </div>
         </div>
         <div>
-          <div className="text-[11px] text-slate-500">납품 완료</div>
-          <div className="mt-1 font-mono text-lg font-semibold text-emerald-400">{formatQty(s.delivered)}</div>
+          <div className="text-[11px] text-slate-500">총 판매가</div>
+          <div className="mt-1 font-mono text-base font-semibold text-cyan-300">
+            {formatQty(Math.round(profit?.totalSale || 0))}
+          </div>
         </div>
         <div>
-          <div className="text-[11px] text-slate-500">발주 잔량</div>
-          <div className="mt-1 font-mono text-lg font-semibold text-amber-400">{formatQty(s.balance)}</div>
+          <div className="text-[11px] text-slate-500">총 부대비용</div>
+          <div className="mt-1 font-mono text-base font-semibold text-amber-400">
+            {formatQty(Math.round(profit?.totalExtra || 0))}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] text-slate-500">총 이익</div>
+          <div
+            className={`mt-1 font-mono text-lg font-bold ${
+              (profit?.margin || 0) >= 0 ? "text-emerald-400" : "text-red-400"
+            }`}
+          >
+            {formatQty(Math.round(profit?.margin || 0))}
+          </div>
         </div>
       </div>
+      <p className="mt-2 text-center text-[10px] text-slate-600">
+        선택 연도 출고 기준 (통화 혼합 시 환율 미반영, 참고용)
+      </p>
 
       <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
         {sortedModels.map((m) => {
@@ -1098,15 +1171,25 @@ function CustomerSummaryCard({ summary: s, revisionsByModel }) {
 }
 
 // 메인 현황 테이블의 모델별 "상세 지표" 행 — 원자재재고 직접수정 + 대기→재고 FIFO 전환 인라인 편집
-function DashboardDetailRow({ row, onEditStock }) {
+function DashboardDetailRow({ row }) {
   const [editingStock, setEditingStock] = useState(false);
   const [stockInput, setStockInput] = useState(String(row.material_stock ?? 0));
   const [editingWaiting, setEditingWaiting] = useState(false);
   const [convertQty, setConvertQty] = useState("");
+  const [editingProductStock, setEditingProductStock] = useState(false);
+  const [productStockInput, setProductStockInput] = useState(String(row.product_stock ?? 0));
+  const [editingWip, setEditingWip] = useState(false);
+  const [wipInput, setWipInput] = useState(String(row.wip_qty ?? 0));
 
   useEffect(() => {
     setStockInput(String(row.material_stock ?? 0));
   }, [row.material_stock]);
+  useEffect(() => {
+    setProductStockInput(String(row.product_stock ?? 0));
+  }, [row.product_stock]);
+  useEffect(() => {
+    setWipInput(String(row.wip_qty ?? 0));
+  }, [row.wip_qty]);
 
   const saveMaterialStock = async () => {
     const { error } = await supabase.rpc("set_material_stock", {
@@ -1116,6 +1199,30 @@ function DashboardDetailRow({ row, onEditStock }) {
     if (handleSupabaseError(error, "원자재재고 수정")) return;
     notifyToast("success", "원자재재고가 수정되었습니다.");
     setEditingStock(false);
+  };
+
+  // 제품재고 / 재공은 같은 adjust_stock RPC를 공유합니다 — 수정하지 않는 쪽은
+  // 현재 값을 그대로 넘겨서, 재공 증가 시의 원자재 자동 소모 로직은 그대로 유지됩니다.
+  const saveProductStock = async () => {
+    const { error } = await supabase.rpc("adjust_stock", {
+      p_product_id: row.id,
+      p_new_wip: Number(row.wip_qty) || 0,
+      p_new_product_stock: Number(productStockInput) || 0,
+    });
+    if (handleSupabaseError(error, "제품재고 수정")) return;
+    notifyToast("success", "제품재고가 수정되었습니다.");
+    setEditingProductStock(false);
+  };
+
+  const saveWip = async () => {
+    const { error } = await supabase.rpc("adjust_stock", {
+      p_product_id: row.id,
+      p_new_wip: Number(wipInput) || 0,
+      p_new_product_stock: Number(row.product_stock) || 0,
+    });
+    if (handleSupabaseError(error, "재공 수정")) return;
+    notifyToast("success", "재공 수량이 수정되었습니다 (증가분만큼 원자재재고에서 자동 차감됩니다).");
+    setEditingWip(false);
   };
 
   const convertWaitingToStock = async () => {
@@ -1140,8 +1247,68 @@ function DashboardDetailRow({ row, onEditStock }) {
     <tr className="hover:bg-slate-800/40">
       <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">상세 지표</td>
       <td className="px-4 py-3 text-right">{formatQty(row.total_order_qty)}</td>
-      <td className="px-4 py-3 text-right">{formatQty(row.product_stock)}</td>
-      <td className="px-4 py-3 text-right text-cyan-300">{formatQty(row.wip_qty)}</td>
+      <td className="px-4 py-3 text-right">
+        {editingProductStock ? (
+          <div className="flex items-center justify-end gap-1">
+            <input
+              type="number"
+              min="0"
+              value={productStockInput}
+              onChange={(e) => setProductStockInput(e.target.value)}
+              className="w-20 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+            />
+            <button onClick={saveProductStock} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400">
+              <Check size={11} />
+            </button>
+            <button
+              onClick={() => setEditingProductStock(false)}
+              className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditingProductStock(true)}
+            className="inline-flex items-center gap-1 font-sans text-slate-100 hover:text-cyan-300"
+            title="제품재고 직접 수정"
+          >
+            <span className="font-mono">{formatQty(row.product_stock)}</span>
+            <Pencil size={10} />
+          </button>
+        )}
+      </td>
+      <td className="px-4 py-3 text-right text-cyan-300">
+        {editingWip ? (
+          <div className="flex items-center justify-end gap-1">
+            <input
+              type="number"
+              min="0"
+              value={wipInput}
+              onChange={(e) => setWipInput(e.target.value)}
+              className="w-20 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+            />
+            <button onClick={saveWip} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400">
+              <Check size={11} />
+            </button>
+            <button
+              onClick={() => setEditingWip(false)}
+              className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditingWip(true)}
+            className="inline-flex items-center gap-1 font-sans text-cyan-300 hover:text-cyan-200"
+            title="재공 직접 수정 (증가분만큼 원자재재고 자동 차감)"
+          >
+            <span className="font-mono">{formatQty(row.wip_qty)}</span>
+            <Pencil size={10} />
+          </button>
+        )}
+      </td>
       <td className="px-4 py-3 text-right text-emerald-400">{formatQty(row.delivered_qty)}</td>
       <td className="px-4 py-3 text-right text-amber-400">{formatQty(row.order_balance)}</td>
       <td className="px-4 py-3 text-right">
@@ -1210,15 +1377,6 @@ function DashboardDetailRow({ row, onEditStock }) {
             <Pencil size={10} />
           </button>
         )}
-      </td>
-      <td className="px-4 py-3 text-center font-sans">
-        <button
-          onClick={() => onEditStock(row)}
-          className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
-        >
-          <Pencil size={12} />
-          수정
-        </button>
       </td>
     </tr>
   );
@@ -1406,6 +1564,56 @@ function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   );
 }
 
+function ShipmentRowCells({ row, onSaveExtraCost, onEdit, onDelete }) {
+  const [extraCostInput, setExtraCostInput] = useState(String(row.extra_cost ?? 0));
+
+  useEffect(() => {
+    setExtraCostInput(String(row.extra_cost ?? 0));
+  }, [row.extra_cost]);
+
+  const dirty = Number(extraCostInput || 0) !== Number(row.extra_cost || 0);
+
+  const save = async () => {
+    const val = Math.max(0, Number(extraCostInput) || 0);
+    await onSaveExtraCost(row, val);
+  };
+
+  return (
+    <tr className="hover:bg-slate-800/40">
+      <td className="px-4 py-3 text-left text-slate-400">{row.manufacturer || "-"}</td>
+      <td className="px-4 py-3 text-left text-slate-400">{row.revision || "-"}</td>
+      <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(row.shipment_date)}</td>
+      <td className="px-4 py-3 text-right font-mono">{formatQty(row.quantity)}</td>
+      <td className="px-4 py-3 text-right font-mono">{formatPrice(row.purchase_price, row.purchase_currency)}</td>
+      <td className="px-4 py-3 text-right font-mono">{formatPrice(row.sale_price, row.sale_currency)}</td>
+      <td className="px-4 py-3 text-right">
+        <div className="flex items-center justify-end gap-1.5">
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={extraCostInput}
+            onChange={(e) => setExtraCostInput(e.target.value)}
+            className="w-20 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+          />
+          {dirty && (
+            <button
+              onClick={save}
+              title="부대비용 저장"
+              className="inline-flex items-center rounded-md bg-cyan-500 px-1.5 py-1 text-slate-950 hover:bg-cyan-400"
+            >
+              <Check size={12} />
+            </button>
+          )}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-center">
+        <RowActions onEdit={() => onEdit(row)} onDelete={() => onDelete(row)} />
+      </td>
+    </tr>
+  );
+}
+
 function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
@@ -1414,6 +1622,13 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       `${row.customer} / ${row.model_name} 출고 내역을 삭제할까요?\n(이 출고에서 자동 기록된 단가 이력도 함께 삭제됩니다)`
     );
     if (ok) onRefresh();
+  };
+
+  const handleSaveExtraCost = async (row, extraCost) => {
+    const { error } = await supabase.from("shipments").update({ extra_cost: extraCost }).eq("id", row.id);
+    if (handleSupabaseError(error, "부대비용 저장")) return;
+    notifyToast("success", "부대비용이 저장되었습니다.");
+    onRefresh();
   };
 
   return (
@@ -1425,6 +1640,7 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
         { label: "수량", align: "right" },
         { label: "매입가", align: "right" },
         { label: "판매가", align: "right" },
+        { label: "부대비용", align: "right" },
         { label: "작업", align: "center" },
       ]}
       rows={rows}
@@ -1445,21 +1661,12 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
           { header: "매입통화", accessor: (r) => r.purchase_currency },
           { header: "판매가", accessor: (r) => r.sale_price },
           { header: "판매통화", accessor: (r) => r.sale_currency },
+          { header: "부대비용", accessor: (r) => r.extra_cost || 0 },
           { header: "출고일", accessor: (r) => r.shipment_date },
         ],
       }}
       renderRow={(r) => (
-        <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 text-left text-slate-400">{r.manufacturer || "-"}</td>
-          <td className="px-4 py-3 text-left text-slate-400">{r.revision || "-"}</td>
-          <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
-          <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
-          <td className="px-4 py-3 text-right font-mono">{formatPrice(r.purchase_price, r.purchase_currency)}</td>
-          <td className="px-4 py-3 text-right font-mono">{formatPrice(r.sale_price, r.sale_currency)}</td>
-          <td className="px-4 py-3 text-center">
-            <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
-          </td>
-        </tr>
+        <ShipmentRowCells key={r.id} row={r} onSaveExtraCost={handleSaveExtraCost} onEdit={onEdit} onDelete={handleDelete} />
       )}
     />
   );
@@ -1649,8 +1856,137 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
 }
 
 /* =========================================================================
-   계층형 카탈로그 훅 — 고객사 → 제조사 → 모델명(구분별) 옵션 계산
+   이익 현황 탭 — 출고 건별 마진(총판매가-총매입가-부대비용), 최신순, 기간 필터
    ========================================================================= */
+function ProfitTab({ rows }) {
+  const [filterStart, setFilterStart] = useState("");
+  const [filterEnd, setFilterEnd] = useState("");
+
+  const computed = useMemo(() => {
+    return rows
+      .map((r) => {
+        const totalPurchase = Number(r.quantity || 0) * Number(r.purchase_price || 0);
+        const totalSale = Number(r.quantity || 0) * Number(r.sale_price || 0);
+        const totalExtra = Number(r.extra_cost || 0);
+        const margin = totalSale - totalPurchase - totalExtra;
+        return { ...r, totalPurchase, totalSale, totalExtra, margin };
+      })
+      .sort((a, b) => (b.shipment_date || "").localeCompare(a.shipment_date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
+  }, [rows]);
+
+  const filtered = useMemo(
+    () => filterRowsByDateRange(computed, "shipment_date", filterStart || null, filterEnd || null),
+    [computed, filterStart, filterEnd]
+  );
+
+  const handleExport = () => {
+    exportToExcel("이익현황.xlsx", filtered, [
+      { header: "고객사", accessor: (r) => r.customer },
+      { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
+      { header: "모델명", accessor: (r) => r.model_name },
+      { header: "리비전", accessor: (r) => r.revision || "" },
+      { header: "출고일", accessor: (r) => r.shipment_date },
+      { header: "수량", accessor: (r) => r.quantity },
+      { header: "총매입가", accessor: (r) => r.totalPurchase },
+      { header: "매입통화", accessor: (r) => r.purchase_currency },
+      { header: "총판매가", accessor: (r) => r.totalSale },
+      { header: "판매통화", accessor: (r) => r.sale_currency },
+      { header: "총부대비용", accessor: (r) => r.totalExtra },
+      { header: "총마진(이익)", accessor: (r) => r.margin },
+    ]);
+  };
+
+  return (
+    <div>
+      <p className="mb-3 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
+        이익 = (수량 × 판매가) − (수량 × 매입가) − 부대비용. 매입가/판매가가 서로 다른 통화(USD/KRW)로 입력된 건은 환율
+        변환 없이 숫자 그대로 계산되니 참고용으로만 활용하세요.
+      </p>
+
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="시작일">
+            <input type="date" className={inputClass} value={filterStart} onChange={(e) => setFilterStart(e.target.value)} />
+          </Field>
+          <Field label="종료일">
+            <input type="date" className={inputClass} value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} />
+          </Field>
+          {(filterStart || filterEnd) && (
+            <button
+              onClick={() => {
+                setFilterStart("");
+                setFilterEnd("");
+              }}
+              className="mb-3 rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
+            >
+              필터 초기화
+            </button>
+          )}
+        </div>
+        <ExportButton onClick={handleExport} label="현재 화면 엑셀로 내보내기" />
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[900px] text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 bg-slate-800/50 text-xs font-medium uppercase tracking-wide text-slate-400">
+                <th className="px-4 py-3 text-left">고객사</th>
+                <th className="px-4 py-3 text-left">모델명</th>
+                <th className="px-4 py-3 text-center">출고일</th>
+                <th className="px-4 py-3 text-right">수량</th>
+                <th className="px-4 py-3 text-right">총 매입가</th>
+                <th className="px-4 py-3 text-right">총 판매가</th>
+                <th className="px-4 py-3 text-right">총 부대비용</th>
+                <th className="px-4 py-3 text-right">총 마진(이익)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/70">
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="px-4 py-10 text-center text-slate-500">
+                    표시할 이익 현황 데이터가 없습니다.
+                  </td>
+                </tr>
+              ) : (
+                filtered.map((r) => (
+                  <tr key={r.id} className="hover:bg-slate-800/40">
+                    <td className="px-4 py-3 text-left">{r.customer}</td>
+                    <td className="px-4 py-3 text-left">
+                      <span className="flex items-center gap-1.5">
+                        <TypeBadge type={r.product_type} />
+                        <span className="font-bold text-slate-100">{r.model_name}</span>
+                        {r.revision && (
+                          <span className="rounded bg-purple-500/10 px-1 py-0.5 text-[10px] font-medium text-purple-300">
+                            {r.revision}
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.totalPurchase, r.purchase_currency)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.totalSale, r.sale_currency)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.totalExtra, r.sale_currency)}</td>
+                    <td
+                      className={`px-4 py-3 text-right font-mono text-base font-bold ${
+                        r.margin >= 0 ? "text-emerald-400" : "text-red-400"
+                      }`}
+                    >
+                      {formatPrice(r.margin, r.sale_currency)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function useCatalogOptions(catalog, customer, manufacturer, productType) {
   const customerOptions = useMemo(
     () => Array.from(new Set(catalog.map((c) => c.customer))).sort((a, b) => a.localeCompare(b, "ko")),
@@ -1839,7 +2175,7 @@ function ShipmentModal({ open, onClose, editing, catalog }) {
     quantity: "",
     purchase_currency: "USD",
     purchase_price: "",
-    sale_currency: "KRW",
+    sale_currency: "USD",
     sale_price: "",
     shipment_date: todayStr(),
   };
@@ -2073,6 +2409,36 @@ function MaterialOrderModal({ open, onClose, editing, catalog }) {
     form.product_type
   );
 
+  // 신규 등록 시에만: 모델명이 정해지면 가장 최근 원자재 Maker를 자동으로 불러옴
+  useEffect(() => {
+    if (editing) return;
+    if (!open) return;
+    if (!form.customer || !form.model_name) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const { data, error } = await supabase
+        .from("material_orders")
+        .select("material_maker")
+        .eq("customer", form.customer)
+        .eq("model_name", form.model_name)
+        .eq("product_type", form.product_type)
+        .not("material_maker", "is", null)
+        .order("order_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!cancelled && !error && data?.material_maker) {
+        setForm((f) => (f.material_maker ? f : { ...f, material_maker: data.material_maker }));
+        notifyToast("success", "최근 원자재 Maker를 자동으로 불러왔습니다. 필요 시 수정하세요.");
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.customer, form.model_name, form.product_type, editing, open]);
+
   const quantityNum = Number(form.quantity) || 0;
   const receivedNum = Math.min(Math.max(0, Number(form.received_qty) || 0), quantityNum || Number(form.received_qty) || 0);
   const pendingNum = Math.max(0, quantityNum - receivedNum);
@@ -2262,7 +2628,7 @@ function PriceHistoryModal({ open, onClose, editing, catalog }) {
     revision: "",
     purchase_currency: "USD",
     purchase_price: "",
-    sale_currency: "KRW",
+    sale_currency: "USD",
     sale_price: "",
     effective_date: todayStr(),
     memo: "",
