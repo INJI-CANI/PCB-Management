@@ -500,7 +500,7 @@ function TypeGroupHeader({ type, count, collapsed, onToggle }) {
 }
 
 // 3단계: 모델명 — 굵고 크게 강조 + 핵심 수치(발주잔량/재공/재고) 표시
-function ModelGroupHeader({ label, count, stats, collapsed, onToggle }) {
+function ModelGroupHeader({ label, count, stats, revisions, collapsed, onToggle }) {
   return (
     <button
       onClick={onToggle}
@@ -508,6 +508,11 @@ function ModelGroupHeader({ label, count, stats, collapsed, onToggle }) {
     >
       <span className="flex min-w-0 items-center gap-2">
         <span className="truncate text-base font-bold text-slate-50 sm:text-lg">{label}</span>
+        {revisions && revisions.length > 0 && (
+          <span className="shrink-0 rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-300">
+            {revisions.join(" · ")}
+          </span>
+        )}
         {count !== undefined && <span className="shrink-0 text-xs font-normal text-slate-500">({count}건)</span>}
       </span>
       <span className="flex shrink-0 items-center gap-3">
@@ -662,6 +667,10 @@ export default function App() {
         totalOrder: Number(row.total_order_qty || 0),
         delivered: Number(row.delivered_qty || 0),
         balance: Number(row.order_balance || 0),
+        materialStock: Number(row.material_stock || 0),
+        materialWaiting: Number(row.material_waiting || 0),
+        productStock: Number(row.product_stock || 0),
+        wipQty: Number(row.wip_qty || 0),
       });
     }
     return Array.from(map.values()).sort((a, b) => a.customer.localeCompare(b.customer, "ko"));
@@ -691,6 +700,22 @@ export default function App() {
       })),
     [dashboardRows]
   );
+
+  // Sample 모델의 리비전 목록 (수주+출고 이력에서 파생, 대시보드 표시용)
+  const revisionsByModel = useMemo(() => {
+    const sets = new Map();
+    const addRev = (r) => {
+      if (r.product_type !== "sample" || !r.revision) return;
+      const key = `${r.customer}::${r.product_type}::${r.model_name}`;
+      if (!sets.has(key)) sets.set(key, new Set());
+      sets.get(key).add(r.revision);
+    };
+    salesRows.forEach(addRev);
+    shipmentRows.forEach(addRev);
+    const result = new Map();
+    for (const [k, set] of sets) result.set(k, Array.from(set).sort((a, b) => a.localeCompare(b, "ko")));
+    return result;
+  }, [salesRows, shipmentRows]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
@@ -758,7 +783,12 @@ export default function App() {
 
       <main className="mx-auto max-w-7xl px-6 py-6">
         {tab === "dashboard" && (
-          <DashboardTab rows={dashboardRows} summary={summaryByCustomer} onEditStock={(row) => openEdit("stock", row)} />
+          <DashboardTab
+            rows={dashboardRows}
+            summary={summaryByCustomer}
+            revisionsByModel={revisionsByModel}
+            onEditStock={(row) => openEdit("stock", row)}
+          />
         )}
         {tab === "sales" && (
           <SalesHistoryTab
@@ -808,7 +838,7 @@ export default function App() {
 /* =========================================================================
    대시보드 탭 (고객사 → 구분 → 모델명 3단계 아코디언 + 기간필터 엑셀)
    ========================================================================= */
-function DashboardTab({ rows, summary, onEditStock }) {
+function DashboardTab({ rows, summary, revisionsByModel, onEditStock }) {
   const grouped = useMemo(() => groupByCustomerTypeModel(rows), [rows]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
   const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
@@ -855,54 +885,15 @@ function DashboardTab({ rows, summary, onEditStock }) {
 
   return (
     <div className="space-y-6">
-      {/* 상단 요약 카드 */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* 상단 요약 카드 (고객사별, 2-Track 정보 전환) */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {summary.length === 0 && (
           <div className="col-span-full rounded-lg border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">
             아직 등록된 데이터가 없습니다. 상단 버튼으로 수주/출고/원자재 발주를 입력해보세요.
           </div>
         )}
         {summary.map((s) => (
-          <div key={s.customer} className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
-            <div className="mb-3 flex items-center gap-2 text-slate-300">
-              <Building2 size={16} className="text-cyan-400" />
-              <span className="text-sm font-semibold">{s.customer}</span>
-            </div>
-            <div className="grid grid-cols-3 gap-3 text-center">
-              <div>
-                <div className="text-[11px] text-slate-500">총 수주량</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-slate-100">{formatQty(s.totalOrder)}</div>
-              </div>
-              <div>
-                <div className="text-[11px] text-slate-500">납품 완료</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-emerald-400">{formatQty(s.delivered)}</div>
-              </div>
-              <div>
-                <div className="text-[11px] text-slate-500">발주 잔량</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-amber-400">{formatQty(s.balance)}</div>
-              </div>
-            </div>
-            <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
-              {s.models
-                .slice()
-                .sort(
-                  (a, b) =>
-                    (TYPE_ORDER[a.product_type] ?? 9) - (TYPE_ORDER[b.product_type] ?? 9) ||
-                    a.model_name.localeCompare(b.model_name, "ko")
-                )
-                .map((m) => (
-                  <div key={`${m.product_type}-${m.model_name}`} className="flex items-center justify-between gap-2 text-xs">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <TypeBadge type={m.product_type} />
-                      <span className="truncate font-sans text-sm font-bold text-slate-100">{m.model_name}</span>
-                    </span>
-                    <span className="shrink-0 font-mono text-slate-500">
-                      총 {formatQty(m.totalOrder)} · 완료 {formatQty(m.delivered)} · 잔량 {formatQty(m.balance)}
-                    </span>
-                  </div>
-                ))}
-            </div>
-          </div>
+          <CustomerSummaryCard key={s.customer} summary={s} revisionsByModel={revisionsByModel} />
         ))}
       </div>
 
@@ -975,6 +966,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
                                         <td colSpan={9} className="p-0">
                                           <ModelGroupHeader
                                             label={m.model_name}
+                                            revisions={t.type === "sample" ? revisionsByModel?.get(modelKey) : undefined}
                                             stats={{
                                               order_balance: r.order_balance,
                                               wip_qty: r.wip_qty,
@@ -985,27 +977,7 @@ function DashboardTab({ rows, summary, onEditStock }) {
                                           />
                                         </td>
                                       </tr>
-                                      {!modelCollapsed && (
-                                        <tr className="hover:bg-slate-800/40">
-                                          <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">상세 지표</td>
-                                          <td className="px-4 py-3 text-right">{formatQty(r.total_order_qty)}</td>
-                                          <td className="px-4 py-3 text-right">{formatQty(r.product_stock)}</td>
-                                          <td className="px-4 py-3 text-right text-cyan-300">{formatQty(r.wip_qty)}</td>
-                                          <td className="px-4 py-3 text-right text-emerald-400">{formatQty(r.delivered_qty)}</td>
-                                          <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.order_balance)}</td>
-                                          <td className="px-4 py-3 text-right">{formatQty(r.material_stock)}</td>
-                                          <td className="px-4 py-3 text-right text-amber-400">{formatQty(r.material_waiting)}</td>
-                                          <td className="px-4 py-3 text-center font-sans">
-                                            <button
-                                              onClick={() => onEditStock(r)}
-                                              className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
-                                            >
-                                              <Pencil size={12} />
-                                              수정
-                                            </button>
-                                          </td>
-                                        </tr>
-                                      )}
+                                      {!modelCollapsed && <DashboardDetailRow row={r} onEditStock={onEditStock} />}
                                     </React.Fragment>
                                   );
                                 })}
@@ -1028,6 +1000,227 @@ function DashboardTab({ rows, summary, onEditStock }) {
         dateHint="최종 갱신일(재공/재고 최종 수정 시각) 기준으로 필터링합니다."
       />
     </div>
+  );
+}
+
+// 고객사 요약 카드: [원자재 현황] / [발주잔량 현황] 2-Track 전환
+function CustomerSummaryCard({ summary: s, revisionsByModel }) {
+  const [viewMode, setViewMode] = useState("material"); // 'material' | 'balance'
+
+  const sortedModels = useMemo(
+    () =>
+      s.models
+        .slice()
+        .sort(
+          (a, b) =>
+            (TYPE_ORDER[a.product_type] ?? 9) - (TYPE_ORDER[b.product_type] ?? 9) ||
+            a.model_name.localeCompare(b.model_name, "ko")
+        ),
+    [s.models]
+  );
+
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-slate-300">
+          <Building2 size={16} className="text-cyan-400" />
+          <span className="text-sm font-semibold">{s.customer}</span>
+        </div>
+        <div className="flex shrink-0 gap-1 rounded-md border border-slate-700 bg-slate-800/60 p-0.5 text-xs">
+          <button
+            onClick={() => setViewMode("material")}
+            className={`rounded px-2 py-1 font-medium transition-colors ${
+              viewMode === "material" ? "bg-cyan-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            원자재 현황
+          </button>
+          <button
+            onClick={() => setViewMode("balance")}
+            className={`rounded px-2 py-1 font-medium transition-colors ${
+              viewMode === "balance" ? "bg-cyan-500 text-slate-950" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            발주잔량 현황
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-center">
+        <div>
+          <div className="text-[11px] text-slate-500">총 수주량</div>
+          <div className="mt-1 font-mono text-lg font-semibold text-slate-100">{formatQty(s.totalOrder)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-slate-500">납품 완료</div>
+          <div className="mt-1 font-mono text-lg font-semibold text-emerald-400">{formatQty(s.delivered)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-slate-500">발주 잔량</div>
+          <div className="mt-1 font-mono text-lg font-semibold text-amber-400">{formatQty(s.balance)}</div>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
+        {sortedModels.map((m) => {
+          const revisions = m.product_type === "sample" ? revisionsByModel?.get(`${s.customer}::${m.product_type}::${m.model_name}`) : null;
+          return (
+            <div key={`${m.product_type}-${m.model_name}`} className="flex items-center justify-between gap-2 text-xs">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <TypeBadge type={m.product_type} />
+                <span className="truncate font-sans text-sm font-bold text-slate-100">{m.model_name}</span>
+                {revisions && revisions.length > 0 && (
+                  <span className="shrink-0 rounded bg-purple-500/10 px-1 py-0.5 text-[10px] font-medium text-purple-300">
+                    {revisions.join(" · ")}
+                  </span>
+                )}
+              </span>
+              <span className="shrink-0 font-mono text-slate-500">
+                {viewMode === "material" ? (
+                  <>
+                    재고 <b className="text-slate-200">{formatQty(m.materialStock)}</b> · 대기{" "}
+                    <b className="text-amber-400">{formatQty(m.materialWaiting)}</b>
+                  </>
+                ) : (
+                  <>
+                    재고 <b className="text-slate-200">{formatQty(m.productStock)}</b> · 재공{" "}
+                    <b className="text-cyan-300">{formatQty(m.wipQty)}</b> · 잔량{" "}
+                    <b className="text-amber-400">{formatQty(m.balance)}</b>
+                  </>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// 메인 현황 테이블의 모델별 "상세 지표" 행 — 원자재재고 직접수정 + 대기→재고 FIFO 전환 인라인 편집
+function DashboardDetailRow({ row, onEditStock }) {
+  const [editingStock, setEditingStock] = useState(false);
+  const [stockInput, setStockInput] = useState(String(row.material_stock ?? 0));
+  const [editingWaiting, setEditingWaiting] = useState(false);
+  const [convertQty, setConvertQty] = useState("");
+
+  useEffect(() => {
+    setStockInput(String(row.material_stock ?? 0));
+  }, [row.material_stock]);
+
+  const saveMaterialStock = async () => {
+    const { error } = await supabase.rpc("set_material_stock", {
+      p_product_id: row.id,
+      p_new_value: Number(stockInput) || 0,
+    });
+    if (handleSupabaseError(error, "원자재재고 수정")) return;
+    notifyToast("success", "원자재재고가 수정되었습니다.");
+    setEditingStock(false);
+  };
+
+  const convertWaitingToStock = async () => {
+    const qty = Number(convertQty) || 0;
+    if (qty <= 0) {
+      notifyToast("error", "전환할 수량을 입력하세요.");
+      return;
+    }
+    const { error } = await supabase.rpc("convert_material_waiting_to_stock", {
+      p_customer: row.customer,
+      p_model: row.model_name,
+      p_type: row.product_type,
+      p_qty: qty,
+    });
+    if (handleSupabaseError(error, "원자재 대기→재고 전환")) return;
+    notifyToast("success", `${formatQty(qty)}개를 원자재재고로 전환했습니다 (원자재 발주 내역에 FIFO로 반영됨).`);
+    setConvertQty("");
+    setEditingWaiting(false);
+  };
+
+  return (
+    <tr className="hover:bg-slate-800/40">
+      <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">상세 지표</td>
+      <td className="px-4 py-3 text-right">{formatQty(row.total_order_qty)}</td>
+      <td className="px-4 py-3 text-right">{formatQty(row.product_stock)}</td>
+      <td className="px-4 py-3 text-right text-cyan-300">{formatQty(row.wip_qty)}</td>
+      <td className="px-4 py-3 text-right text-emerald-400">{formatQty(row.delivered_qty)}</td>
+      <td className="px-4 py-3 text-right text-amber-400">{formatQty(row.order_balance)}</td>
+      <td className="px-4 py-3 text-right">
+        {editingStock ? (
+          <div className="flex items-center justify-end gap-1">
+            <input
+              type="number"
+              min="0"
+              value={stockInput}
+              onChange={(e) => setStockInput(e.target.value)}
+              className="w-20 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+            />
+            <button onClick={saveMaterialStock} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400">
+              <Check size={11} />
+            </button>
+            <button
+              onClick={() => setEditingStock(false)}
+              className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditingStock(true)}
+            className="inline-flex items-center gap-1 font-sans text-slate-100 hover:text-cyan-300"
+            title="원자재재고 직접 수정"
+          >
+            <span className="font-mono">{formatQty(row.material_stock)}</span>
+            <Pencil size={10} />
+          </button>
+        )}
+      </td>
+      <td className="px-4 py-3 text-right text-amber-400">
+        {editingWaiting ? (
+          <div className="flex items-center justify-end gap-1">
+            <input
+              type="number"
+              min="0"
+              max={row.material_waiting}
+              placeholder="전환수량"
+              value={convertQty}
+              onChange={(e) => setConvertQty(e.target.value)}
+              className="w-20 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+            />
+            <button onClick={convertWaitingToStock} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400">
+              <Check size={11} />
+            </button>
+            <button
+              onClick={() => {
+                setEditingWaiting(false);
+                setConvertQty("");
+              }}
+              className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditingWaiting(true)}
+            className="inline-flex items-center gap-1 font-sans hover:text-cyan-300"
+            title="대기 수량을 재고로 전환 (FIFO)"
+          >
+            <span className="font-mono">{formatQty(row.material_waiting)}</span>
+            <Pencil size={10} />
+          </button>
+        )}
+      </td>
+      <td className="px-4 py-3 text-center font-sans">
+        <button
+          onClick={() => onEditStock(row)}
+          className="inline-flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700"
+        >
+          <Pencil size={12} />
+          수정
+        </button>
+      </td>
+    </tr>
   );
 }
 
