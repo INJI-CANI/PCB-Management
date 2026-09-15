@@ -25,6 +25,7 @@ import {
   FlaskConical,
   Factory,
   TrendingUp,
+  Landmark,
 } from "lucide-react";
 
 /* =========================================================================
@@ -547,6 +548,9 @@ export default function App() {
   const [shipmentRows, setShipmentRows] = useState([]);
   const [materialRows, setMaterialRows] = useState([]);
   const [priceHistoryRows, setPriceHistoryRows] = useState([]);
+  const [profitRows, setProfitRows] = useState([]);
+  const [tradeConditions, setTradeConditions] = useState([]);
+  const [exchangeRates, setExchangeRates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastSync, setLastSync] = useState(null);
 
@@ -617,11 +621,58 @@ export default function App() {
     setPriceHistoryRows(data || []);
   }, []);
 
+  const fetchProfit = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("profit_view")
+      .select("*")
+      .order("shipment_date", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (handleSupabaseError(error, "이익 현황 조회")) return;
+    setProfitRows(data || []);
+  }, []);
+
+  const fetchTradeConditions = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("trade_conditions")
+      .select("*")
+      .order("subject_type", { ascending: true })
+      .order("subject_name", { ascending: true });
+    if (handleSupabaseError(error, "업체별 거래조건 조회")) return;
+    setTradeConditions(data || []);
+  }, []);
+
+  const fetchExchangeRates = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("exchange_rates")
+      .select("*")
+      .order("rate_date", { ascending: false });
+    if (handleSupabaseError(error, "환율 조회")) return;
+    setExchangeRates(data || []);
+  }, []);
+
   const fetchAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([fetchDashboard(), fetchSales(), fetchShipments(), fetchMaterials(), fetchPriceHistory()]);
+    await Promise.all([
+      fetchDashboard(),
+      fetchSales(),
+      fetchShipments(),
+      fetchMaterials(),
+      fetchPriceHistory(),
+      fetchProfit(),
+      fetchTradeConditions(),
+      fetchExchangeRates(),
+    ]);
     setLoading(false);
-  }, [fetchDashboard, fetchSales, fetchShipments, fetchMaterials, fetchPriceHistory]);
+  }, [
+    fetchDashboard,
+    fetchSales,
+    fetchShipments,
+    fetchMaterials,
+    fetchPriceHistory,
+    fetchProfit,
+    fetchTradeConditions,
+    fetchExchangeRates,
+  ]);
 
   useEffect(() => {
     fetchAll();
@@ -636,12 +687,21 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "shipments" }, () => {
         fetchDashboard();
         fetchShipments();
+        fetchProfit();
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "material_orders" }, () => {
         fetchDashboard();
         fetchMaterials();
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "price_history" }, () => fetchPriceHistory())
+      .on("postgres_changes", { event: "*", schema: "public", table: "trade_conditions" }, () => {
+        fetchTradeConditions();
+        fetchProfit();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "exchange_rates" }, () => {
+        fetchExchangeRates();
+        fetchProfit();
+      })
       .subscribe();
 
     return () => {
@@ -746,6 +806,7 @@ export default function App() {
             { key: "material", label: "원자재 발주 내역", icon: Boxes },
             { key: "price_history", label: "단가 이력", icon: History },
             { key: "profit", label: "이익 현황", icon: TrendingUp },
+            { key: "trade_conditions", label: "업체별 거래조건", icon: Landmark },
           ].map((t) => (
             <button
               key={t.key}
@@ -774,6 +835,9 @@ export default function App() {
         <PrimaryButton icon={Plus} onClick={() => openCreate("price")}>
           단가 이력 추가
         </PrimaryButton>
+        <PrimaryButton icon={Plus} onClick={() => openCreate("trade_condition")}>
+          거래조건 입력
+        </PrimaryButton>
         <button
           onClick={() => openCreate("stock")}
           className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700"
@@ -789,6 +853,7 @@ export default function App() {
             rows={dashboardRows}
             summary={summaryByCustomer}
             shipmentRows={shipmentRows}
+            profitRows={profitRows}
             revisionsByModel={revisionsByModel}
           />
         )}
@@ -824,13 +889,23 @@ export default function App() {
             onRefresh={fetchPriceHistory}
           />
         )}
-        {tab === "profit" && <ProfitTab rows={shipmentRows} />}
+        {tab === "profit" && <ProfitTab rows={profitRows} />}
+        {tab === "trade_conditions" && (
+          <TradeConditionsTab
+            tradeConditions={tradeConditions}
+            exchangeRates={exchangeRates}
+            onEdit={(row) => openEdit("trade_condition", row)}
+            onRefreshConditions={fetchTradeConditions}
+            onRefreshRates={fetchExchangeRates}
+          />
+        )}
       </main>
 
       <SalesOrderModal open={modal === "sales"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
       <ShipmentModal open={modal === "shipment"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
       <MaterialOrderModal open={modal === "material"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
       <PriceHistoryModal open={modal === "price"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
+      <TradeConditionModal open={modal === "trade_condition"} onClose={closeModal} editing={editingRecord} catalog={catalog} />
       <StockEditModal open={modal === "stock"} onClose={closeModal} products={dashboardRows} initial={editingRecord} />
 
       <ToastHost />
@@ -841,7 +916,7 @@ export default function App() {
 /* =========================================================================
    대시보드 탭 (고객사 → 구분 → 모델명 3단계 아코디언 + 기간필터 엑셀)
    ========================================================================= */
-function DashboardTab({ rows, summary, shipmentRows, revisionsByModel }) {
+function DashboardTab({ rows, summary, shipmentRows, profitRows, revisionsByModel }) {
   const grouped = useMemo(() => groupByCustomerTypeModel(rows), [rows]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
   const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
@@ -861,21 +936,57 @@ function DashboardTab({ rows, summary, shipmentRows, revisionsByModel }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shipmentRows]);
 
+  // 통화별로 분리된 매입/판매/부대비용 합계 (USD 거래분과 KRW 거래분을 섞지 않음)
   const profitByCustomer = useMemo(() => {
     const map = new Map();
     for (const r of shipmentRows) {
       const y = Number((r.shipment_date || "").slice(0, 4));
       if (y !== selectedYear) continue;
-      if (!map.has(r.customer)) map.set(r.customer, { totalPurchase: 0, totalSale: 0, totalExtra: 0 });
+      if (!map.has(r.customer)) {
+        map.set(r.customer, {
+          purchaseUSD: 0,
+          purchaseKRW: 0,
+          saleUSD: 0,
+          saleKRW: 0,
+          extraUSD: 0,
+          extraKRW: 0,
+        });
+      }
       const cur = map.get(r.customer);
-      cur.totalPurchase += Number(r.quantity || 0) * Number(r.purchase_price || 0);
-      cur.totalSale += Number(r.quantity || 0) * Number(r.sale_price || 0);
-      cur.totalExtra += Number(r.extra_cost || 0);
+      const totalPurchase = Number(r.quantity || 0) * Number(r.purchase_price || 0);
+      const totalSale = Number(r.quantity || 0) * Number(r.sale_price || 0);
+      const extra = Number(r.extra_cost || 0);
+
+      if (r.purchase_currency === "USD") cur.purchaseUSD += totalPurchase;
+      else cur.purchaseKRW += totalPurchase;
+
+      if (r.sale_currency === "USD") {
+        cur.saleUSD += totalSale;
+        cur.extraUSD += extra;
+      } else {
+        cur.saleKRW += totalSale;
+        cur.extraKRW += extra;
+      }
     }
-    const result = new Map();
-    for (const [k, v] of map) result.set(k, { ...v, margin: v.totalSale - v.totalPurchase - v.totalExtra });
-    return result;
+    return map;
   }, [shipmentRows, selectedYear]);
+
+  // 총 이익(KRW 환산, 통화 무관 단일 통합값) — profit_view의 margin_krw를 그대로 합산
+  const marginKrwByCustomer = useMemo(() => {
+    const map = new Map();
+    for (const r of profitRows) {
+      const y = Number((r.shipment_date || "").slice(0, 4));
+      if (y !== selectedYear) continue;
+      const cur = map.get(r.customer) || { marginKrw: 0, hasNull: false };
+      if (r.margin_krw === null || r.margin_krw === undefined) {
+        cur.hasNull = true;
+      } else {
+        cur.marginKrw += Number(r.margin_krw);
+      }
+      map.set(r.customer, cur);
+    }
+    return map;
+  }, [profitRows, selectedYear]);
 
   const toggleCustomer = (customer) =>
     setCollapsedCustomers((prev) => {
@@ -946,6 +1057,7 @@ function DashboardTab({ rows, summary, shipmentRows, revisionsByModel }) {
               key={s.customer}
               summary={s}
               profit={profitByCustomer.get(s.customer)}
+              marginKrw={marginKrwByCustomer.get(s.customer)}
               revisionsByModel={revisionsByModel}
             />
           ))}
@@ -1058,7 +1170,7 @@ function DashboardTab({ rows, summary, shipmentRows, revisionsByModel }) {
 }
 
 // 고객사 요약 카드: 상단 이익현황(매입/판매/부대비용/이익) + 하단 [원자재 현황]/[발주잔량 현황] 2-Track 전환
-function CustomerSummaryCard({ summary: s, profit, revisionsByModel }) {
+function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }) {
   const [viewMode, setViewMode] = useState("material"); // 'material' | 'balance'
 
   const sortedModels = useMemo(
@@ -1072,6 +1184,8 @@ function CustomerSummaryCard({ summary: s, profit, revisionsByModel }) {
         ),
     [s.models]
   );
+
+  const p = profit || { purchaseUSD: 0, purchaseKRW: 0, saleUSD: 0, saleKRW: 0, extraUSD: 0, extraKRW: 0 };
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
@@ -1100,38 +1214,49 @@ function CustomerSummaryCard({ summary: s, profit, revisionsByModel }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
-        <div>
+      {/* 매입/판매/부대비용 (USD·KRW 2줄 분리) + 총이익 (KRW 단일 병합) */}
+      <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
+        <div className="text-center">
           <div className="text-[11px] text-slate-500">총 매입가</div>
-          <div className="mt-1 font-mono text-base font-semibold text-slate-100">
-            {formatQty(Math.round(profit?.totalPurchase || 0))}
+          <div className="mt-1 font-mono text-xs font-semibold text-slate-300">
+            <span className="text-slate-500">$</span> {formatQty(Math.round(p.purchaseUSD))}
+          </div>
+          <div className="font-mono text-xs font-semibold text-slate-300">
+            <span className="text-slate-500">₩</span> {formatQty(Math.round(p.purchaseKRW))}
           </div>
         </div>
-        <div>
+        <div className="text-center">
           <div className="text-[11px] text-slate-500">총 판매가</div>
-          <div className="mt-1 font-mono text-base font-semibold text-cyan-300">
-            {formatQty(Math.round(profit?.totalSale || 0))}
+          <div className="mt-1 font-mono text-xs font-semibold text-cyan-300">
+            <span className="text-slate-500">$</span> {formatQty(Math.round(p.saleUSD))}
+          </div>
+          <div className="font-mono text-xs font-semibold text-cyan-300">
+            <span className="text-slate-500">₩</span> {formatQty(Math.round(p.saleKRW))}
           </div>
         </div>
-        <div>
+        <div className="text-center">
           <div className="text-[11px] text-slate-500">총 부대비용</div>
-          <div className="mt-1 font-mono text-base font-semibold text-amber-400">
-            {formatQty(Math.round(profit?.totalExtra || 0))}
+          <div className="mt-1 font-mono text-xs font-semibold text-amber-400">
+            <span className="text-slate-500">$</span> {formatQty(Math.round(p.extraUSD))}
+          </div>
+          <div className="font-mono text-xs font-semibold text-amber-400">
+            <span className="text-slate-500">₩</span> {formatQty(Math.round(p.extraKRW))}
           </div>
         </div>
-        <div>
-          <div className="text-[11px] text-slate-500">총 이익</div>
+        <div className="col-span-3 flex flex-col items-center justify-center rounded-lg bg-slate-800/40 py-2 sm:col-span-1">
+          <div className="text-[11px] text-slate-500">총 이익 (KRW)</div>
           <div
             className={`mt-1 font-mono text-lg font-bold ${
-              (profit?.margin || 0) >= 0 ? "text-emerald-400" : "text-red-400"
+              (marginKrw?.marginKrw || 0) >= 0 ? "text-emerald-400" : "text-red-400"
             }`}
           >
-            {formatQty(Math.round(profit?.margin || 0))}
+            ₩ {formatQty(Math.round(marginKrw?.marginKrw || 0))}
           </div>
+          {marginKrw?.hasNull && <div className="mt-0.5 text-[10px] text-amber-400">일부 환율 미입력</div>}
         </div>
       </div>
       <p className="mt-2 text-center text-[10px] text-slate-600">
-        선택 연도 출고 기준 (통화 혼합 시 환율 미반영, 참고용)
+        선택 연도 출고 기준 · 총 이익은 업체별 거래조건 환율로 원화 환산된 통합값입니다
       </p>
 
       <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
@@ -1862,21 +1987,17 @@ function ProfitTab({ rows }) {
   const [filterStart, setFilterStart] = useState("");
   const [filterEnd, setFilterEnd] = useState("");
 
-  const computed = useMemo(() => {
-    return rows
-      .map((r) => {
-        const totalPurchase = Number(r.quantity || 0) * Number(r.purchase_price || 0);
-        const totalSale = Number(r.quantity || 0) * Number(r.sale_price || 0);
-        const totalExtra = Number(r.extra_cost || 0);
-        const margin = totalSale - totalPurchase - totalExtra;
-        return { ...r, totalPurchase, totalSale, totalExtra, margin };
-      })
-      .sort((a, b) => (b.shipment_date || "").localeCompare(a.shipment_date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
-  }, [rows]);
+  const sorted = useMemo(
+    () =>
+      [...rows].sort(
+        (a, b) => (b.shipment_date || "").localeCompare(a.shipment_date || "") || (b.created_at || "").localeCompare(a.created_at || "")
+      ),
+    [rows]
+  );
 
   const filtered = useMemo(
-    () => filterRowsByDateRange(computed, "shipment_date", filterStart || null, filterEnd || null),
-    [computed, filterStart, filterEnd]
+    () => filterRowsByDateRange(sorted, "shipment_date", filterStart || null, filterEnd || null),
+    [sorted, filterStart, filterEnd]
   );
 
   const handleExport = () => {
@@ -1887,20 +2008,21 @@ function ProfitTab({ rows }) {
       { header: "리비전", accessor: (r) => r.revision || "" },
       { header: "출고일", accessor: (r) => r.shipment_date },
       { header: "수량", accessor: (r) => r.quantity },
-      { header: "총매입가", accessor: (r) => r.totalPurchase },
-      { header: "매입통화", accessor: (r) => r.purchase_currency },
-      { header: "총판매가", accessor: (r) => r.totalSale },
+      { header: "총판매가", accessor: (r) => r.total_sale },
       { header: "판매통화", accessor: (r) => r.sale_currency },
-      { header: "총부대비용", accessor: (r) => r.totalExtra },
+      { header: "총부대비용", accessor: (r) => r.total_extra_cost },
       { header: "총마진(이익)", accessor: (r) => r.margin },
+      { header: "총마진(KRW)", accessor: (r) => r.margin_krw },
+      { header: "적용 거래조건", accessor: (r) => r.applied_rate_basis },
+      { header: "임시환율여부", accessor: (r) => (r.margin_krw_is_temp ? "임시" : "") },
     ]);
   };
 
   return (
     <div>
       <p className="mb-3 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
-        이익 = (수량 × 판매가) − (수량 × 매입가) − 부대비용. 매입가/판매가가 서로 다른 통화(USD/KRW)로 입력된 건은 환율
-        변환 없이 숫자 그대로 계산되니 참고용으로만 활용하세요.
+        이익 = (수량 × 판매가) − (수량 × 매입가) − 부대비용. 총마진(KRW)은 KRW 결제 건은 그대로, USD 결제 건은 거래처별
+        거래조건(업체별 거래조건 탭)에 등록된 환율 기준으로 원화 환산한 값입니다. 환율 데이터가 없으면 "-"로 표시됩니다.
       </p>
 
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
@@ -1928,17 +2050,17 @@ function ProfitTab({ rows }) {
 
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px] text-sm">
+          <table className="w-full min-w-[980px] text-sm">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-800/50 text-xs font-medium uppercase tracking-wide text-slate-400">
                 <th className="px-4 py-3 text-left">고객사</th>
                 <th className="px-4 py-3 text-left">모델명</th>
                 <th className="px-4 py-3 text-center">출고일</th>
                 <th className="px-4 py-3 text-right">수량</th>
-                <th className="px-4 py-3 text-right">총 매입가</th>
                 <th className="px-4 py-3 text-right">총 판매가</th>
                 <th className="px-4 py-3 text-right">총 부대비용</th>
                 <th className="px-4 py-3 text-right">총 마진(이익)</th>
+                <th className="px-4 py-3 text-right">총 마진(KRW)</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/70">
@@ -1965,15 +2087,34 @@ function ProfitTab({ rows }) {
                     </td>
                     <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
                     <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.totalPurchase, r.purchase_currency)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.totalSale, r.sale_currency)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.totalExtra, r.sale_currency)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.total_sale, r.sale_currency)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.total_extra_cost, r.sale_currency)}</td>
                     <td
                       className={`px-4 py-3 text-right font-mono text-base font-bold ${
                         r.margin >= 0 ? "text-emerald-400" : "text-red-400"
                       }`}
                     >
                       {formatPrice(r.margin, r.sale_currency)}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {r.margin_krw === null || r.margin_krw === undefined ? (
+                        <span className="font-mono text-slate-600">-</span>
+                      ) : (
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span
+                            className={`font-mono text-base font-bold ${
+                              r.margin_krw >= 0 ? "text-blue-400" : "text-red-400"
+                            }`}
+                          >
+                            {formatPrice(r.margin_krw, "KRW")}
+                          </span>
+                          {r.margin_krw_is_temp && (
+                            <span className="rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-400">
+                              (임시환율 적용)
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -2774,6 +2915,381 @@ function PriceHistoryModal({ open, onClose, editing, catalog }) {
         </p>
       )}
       <div className="mt-4 flex justify-end gap-2">
+        <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
+          취소
+        </button>
+        <PrimaryButton onClick={submit} className={saving ? "opacity-60" : ""}>
+          {saving ? "저장 중..." : "저장"}
+        </PrimaryButton>
+      </div>
+    </Modal>
+  );
+}
+
+/* =========================================================================
+   ⑥ 업체별 거래조건 탭 + 환율 관리 (거래조건 입력으로 등록된 데이터 조회)
+   ========================================================================= */
+const RATE_BASIS_OPTIONS = ["당월1일~25일평균", "당월말일자", "전월말일자", "납품일자", "전월평균"];
+
+function TradeConditionsTab({ tradeConditions, exchangeRates, onEdit, onRefreshConditions, onRefreshRates }) {
+  const handleDeleteCondition = async (row) => {
+    const ok = await deleteRecord("trade_conditions", row.id, `${row.subject_name} 거래조건을 삭제할까요?`);
+    if (ok) onRefreshConditions();
+  };
+
+  const sortedConditions = useMemo(
+    () =>
+      tradeConditions
+        .slice()
+        .sort(
+          (a, b) =>
+            a.subject_type.localeCompare(b.subject_type) || a.subject_name.localeCompare(b.subject_name, "ko")
+        ),
+    [tradeConditions]
+  );
+
+  return (
+    <div className="space-y-8">
+      {/* 업체별 거래조건 목록 */}
+      <div>
+        <h2 className="mb-3 text-sm font-semibold text-slate-300">업체별 거래조건</h2>
+        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 bg-slate-800/50 text-xs font-medium uppercase tracking-wide text-slate-400">
+                  <th className="px-4 py-3 text-center">구분</th>
+                  <th className="px-4 py-3 text-left">업체명</th>
+                  <th className="px-4 py-3 text-left">거래조건 (환율 적용 기준)</th>
+                  <th className="px-4 py-3 text-left">메모</th>
+                  <th className="px-4 py-3 text-center">작업</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/70">
+                {sortedConditions.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-10 text-center text-slate-500">
+                      등록된 거래조건이 없습니다.
+                    </td>
+                  </tr>
+                ) : (
+                  sortedConditions.map((row) => (
+                    <tr key={row.id} className="hover:bg-slate-800/40">
+                      <td className="px-4 py-3 text-center">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                            row.subject_type === "customer"
+                              ? "bg-cyan-500/10 text-cyan-300"
+                              : "bg-amber-500/10 text-amber-300"
+                          }`}
+                        >
+                          {row.subject_type === "customer" ? "고객사" : "제조사"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-left font-medium text-slate-100">{row.subject_name}</td>
+                      <td className="px-4 py-3 text-left text-slate-300">{row.rate_basis}</td>
+                      <td className="px-4 py-3 text-left text-slate-500">{row.memo || "-"}</td>
+                      <td className="px-4 py-3 text-center">
+                        <RowActions onEdit={() => onEdit(row)} onDelete={() => handleDeleteCondition(row)} />
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p className="mt-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
+          여기 등록된 거래조건(제조사 우선, 없으면 고객사 기준)이 [이익 현황]과 대시보드 요약의 USD→KRW 환산 계산에
+          자동으로 적용됩니다. 등록되지 않은 업체는 기본값으로 "납품일자(출고일 당일)" 환율이 적용됩니다.
+        </p>
+      </div>
+
+      {/* 환율 관리 */}
+      <ExchangeRateManager exchangeRates={exchangeRates} onRefreshRates={onRefreshRates} />
+    </div>
+  );
+}
+
+function ExchangeRateManager({ exchangeRates, onRefreshRates }) {
+  const [manualDate, setManualDate] = useState(todayStr());
+  const [manualRate, setManualRate] = useState("");
+  const [savingManual, setSavingManual] = useState(false);
+
+  const [apiStart, setApiStart] = useState("");
+  const [apiEnd, setApiEnd] = useState("");
+  const [apiLoading, setApiLoading] = useState(false);
+
+  const saveManualRate = async () => {
+    if (!manualDate || !manualRate) {
+      notifyToast("error", "날짜와 환율을 모두 입력하세요.");
+      return;
+    }
+    setSavingManual(true);
+    const { error } = await supabase
+      .from("exchange_rates")
+      .upsert([{ rate_date: manualDate, usd_krw_rate: Number(manualRate) }], { onConflict: "rate_date" });
+    setSavingManual(false);
+    if (handleSupabaseError(error, "환율 저장")) return;
+    notifyToast("success", `${manualDate} 환율이 저장되었습니다.`);
+    setManualRate("");
+    onRefreshRates();
+  };
+
+  const fetchFromApi = async () => {
+    if (!apiStart || !apiEnd) {
+      notifyToast("error", "시작일과 종료일을 입력하세요.");
+      return;
+    }
+    if (apiStart > apiEnd) {
+      notifyToast("error", "시작일이 종료일보다 늦을 수 없습니다.");
+      return;
+    }
+    setApiLoading(true);
+    try {
+      const res = await fetch(`https://api.frankfurter.app/${apiStart}..${apiEnd}?from=USD&to=KRW`);
+      if (!res.ok) throw new Error(`API 응답 오류 (${res.status})`);
+      const json = await res.json();
+      const entries = Object.entries(json.rates || {})
+        .filter(([, v]) => v && v.KRW)
+        .map(([date, v]) => ({ rate_date: date, usd_krw_rate: v.KRW }));
+      if (entries.length === 0) {
+        notifyToast("error", "가져온 환율 데이터가 없습니다 (주말/공휴일은 데이터가 없을 수 있습니다).");
+        return;
+      }
+      const { error } = await supabase.from("exchange_rates").upsert(entries, { onConflict: "rate_date" });
+      if (handleSupabaseError(error, "환율 저장")) return;
+      notifyToast(
+        "success",
+        `${entries.length}일치 환율을 가져왔습니다. (참고용 근사치입니다 — 정확한 값이 필요하면 서울외국환중개 고시환율로 직접 확인 후 수동 입력으로 덮어써주세요)`
+      );
+      onRefreshRates();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(e);
+      notifyToast("error", `환율 자동 가져오기 실패: ${e.message}`);
+    } finally {
+      setApiLoading(false);
+    }
+  };
+
+  const handleDeleteRate = async (row) => {
+    const ok = window.confirm(`${row.rate_date} 환율(₩${row.usd_krw_rate})을 삭제할까요?`);
+    if (!ok) return;
+    const { error } = await supabase.from("exchange_rates").delete().eq("rate_date", row.rate_date);
+    if (handleSupabaseError(error, "환율 삭제")) return;
+    notifyToast("success", "삭제되었습니다.");
+    onRefreshRates();
+  };
+
+  const recentRates = useMemo(() => exchangeRates.slice(0, 60), [exchangeRates]);
+
+  return (
+    <div>
+      <h2 className="mb-3 text-sm font-semibold text-slate-300">환율 관리 (USD → KRW, 일별)</h2>
+      <p className="mb-3 rounded-md bg-amber-500/10 p-2.5 text-xs text-amber-300">
+        Supabase는 외부 금융 사이트 데이터를 자동으로 가져올 수 없어, 이 화면에서 환율을 직접 채워야 위 [이익
+        현황]/[대시보드] 환산 계산이 동작합니다. 아래 "자동 가져오기"는 무료 공개 환율 API(Frankfurter, ECB 기준)를
+        사용한 참고용 근사치이며, 서울외국환중개 고시환율과 정확히 일치하지 않을 수 있습니다. 정확한 값이 필요하면
+        수동 입력으로 덮어써주세요.
+      </p>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {/* 수동 입력 */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+          <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">날짜 하나씩 수동 입력</h3>
+          <Field label="날짜">
+            <input type="date" className={inputClass} value={manualDate} onChange={(e) => setManualDate(e.target.value)} />
+          </Field>
+          <Field label="환율 (1 USD = ? KRW)">
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              className={inputClass}
+              value={manualRate}
+              onChange={(e) => setManualRate(e.target.value)}
+              placeholder="예: 1380.50"
+            />
+          </Field>
+          <PrimaryButton onClick={saveManualRate} className={savingManual ? "opacity-60" : ""}>
+            {savingManual ? "저장 중..." : "저장"}
+          </PrimaryButton>
+        </div>
+
+        {/* 기간 자동 가져오기 */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+          <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">기간으로 한 번에 가져오기 (참고용)</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="시작일">
+              <input type="date" className={inputClass} value={apiStart} onChange={(e) => setApiStart(e.target.value)} />
+            </Field>
+            <Field label="종료일">
+              <input type="date" className={inputClass} value={apiEnd} onChange={(e) => setApiEnd(e.target.value)} />
+            </Field>
+          </div>
+          <PrimaryButton icon={RefreshCw} onClick={fetchFromApi} className={apiLoading ? "opacity-60" : ""}>
+            {apiLoading ? "가져오는 중..." : "자동 가져오기"}
+          </PrimaryButton>
+        </div>
+      </div>
+
+      {/* 최근 등록된 환율 목록 */}
+      <div className="mt-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+        <div className="max-h-80 overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0">
+              <tr className="border-b border-slate-800 bg-slate-800/90 text-xs font-medium uppercase tracking-wide text-slate-400">
+                <th className="px-4 py-2 text-center">날짜</th>
+                <th className="px-4 py-2 text-right">환율 (₩)</th>
+                <th className="px-4 py-2 text-center">작업</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/70">
+              {recentRates.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="px-4 py-8 text-center text-slate-500">
+                    등록된 환율이 없습니다.
+                  </td>
+                </tr>
+              ) : (
+                recentRates.map((r) => (
+                  <tr key={r.rate_date} className="hover:bg-slate-800/40">
+                    <td className="px-4 py-2 text-center font-mono text-slate-300">{formatDate(r.rate_date)}</td>
+                    <td className="px-4 py-2 text-right font-mono">₩ {formatQty(r.usd_krw_rate)}</td>
+                    <td className="px-4 py-2 text-center">
+                      <button
+                        onClick={() => handleDeleteRate(r)}
+                        className="inline-flex items-center gap-1 rounded-md border border-red-900/60 px-2 py-1 text-xs text-red-400 hover:bg-red-950/40"
+                      >
+                        <Trash2 size={11} />
+                        삭제
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {exchangeRates.length > recentRates.length && (
+        <p className="mt-1 text-right text-[11px] text-slate-600">최근 {recentRates.length}건만 표시 중 (전체 {exchangeRates.length}건 저장됨)</p>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   ⑦ 거래조건 입력 / 수정 모달
+   ========================================================================= */
+function TradeConditionModal({ open, onClose, editing }) {
+  const emptyForm = { subject_type: "manufacturer", subject_name: "", rate_basis: "", memo: "" };
+  const [form, setForm] = useState(emptyForm);
+  const [saving, setSaving] = useState(false);
+  const [customRateBasis, setCustomRateBasis] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    if (editing) {
+      setForm({
+        subject_type: editing.subject_type || "manufacturer",
+        subject_name: editing.subject_name || "",
+        rate_basis: editing.rate_basis || "",
+        memo: editing.memo || "",
+      });
+      setCustomRateBasis(!RATE_BASIS_OPTIONS.includes(editing.rate_basis));
+    } else {
+      setForm(emptyForm);
+      setCustomRateBasis(false);
+    }
+  }, [open, editing]);
+
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const submit = async () => {
+    if (!form.subject_name || !form.rate_basis) {
+      notifyToast("error", "업체명과 거래조건은 필수 입력 항목입니다.");
+      return;
+    }
+    setSaving(true);
+    const payload = {
+      subject_type: form.subject_type,
+      subject_name: form.subject_name,
+      rate_basis: form.rate_basis,
+      memo: form.memo || null,
+    };
+    const { error } = editing
+      ? await supabase.from("trade_conditions").update(payload).eq("id", editing.id)
+      : await supabase.from("trade_conditions").upsert(payload, { onConflict: "subject_type,subject_name" });
+    setSaving(false);
+    if (handleSupabaseError(error, editing ? "거래조건 수정" : "거래조건 등록")) return;
+    notifyToast("success", editing ? "거래조건이 수정되었습니다." : "거래조건이 등록되었습니다.");
+    onClose();
+  };
+
+  return (
+    <Modal open={open} title={editing ? "거래조건 수정" : "거래조건 입력"} onClose={onClose}>
+      <Field label="구분">
+        <select className={inputClass} value={form.subject_type} onChange={set("subject_type")}>
+          <option value="customer">고객사</option>
+          <option value="manufacturer">제조사</option>
+        </select>
+      </Field>
+      <Field label="업체명">
+        <input className={inputClass} value={form.subject_name} onChange={set("subject_name")} placeholder="예: 파트론" />
+      </Field>
+      <Field label="거래조건 (환율 적용 기준)">
+        {customRateBasis ? (
+          <div className="flex gap-2">
+            <input
+              className={inputClass}
+              value={form.rate_basis}
+              onChange={set("rate_basis")}
+              placeholder="예: 분기 평균 환율"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={() => setCustomRateBasis(false)}
+              className="shrink-0 rounded-md border border-slate-700 px-2 text-xs text-slate-300 hover:bg-slate-800"
+            >
+              목록
+            </button>
+          </div>
+        ) : (
+          <select
+            className={inputClass}
+            value={RATE_BASIS_OPTIONS.includes(form.rate_basis) ? form.rate_basis : ""}
+            onChange={(e) => {
+              if (e.target.value === "__custom__") {
+                setCustomRateBasis(true);
+                setForm((f) => ({ ...f, rate_basis: "" }));
+              } else {
+                setForm((f) => ({ ...f, rate_basis: e.target.value }));
+              }
+            }}
+          >
+            <option value="" disabled>
+              선택하세요
+            </option>
+            <option value="__custom__">+ 직접 입력</option>
+            {RATE_BASIS_OPTIONS.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        )}
+      </Field>
+      <Field label="메모 (선택)">
+        <input className={inputClass} value={form.memo} onChange={set("memo")} />
+      </Field>
+      <p className="mb-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
+        여기서 등록한 거래조건은 [이익 현황]과 대시보드 요약의 USD→KRW 환산 계산에 자동으로 반영됩니다. 같은
+        구분+업체명 조합으로 다시 등록하면 기존 조건이 갱신됩니다.
+      </p>
+      <div className="mt-2 flex justify-end gap-2">
         <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
           취소
         </button>
