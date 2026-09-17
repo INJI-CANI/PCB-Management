@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import * as XLSX from "xlsx";
 import {
@@ -113,6 +113,17 @@ function formatPrice(value, currency) {
   return `${symbol}${withComma}.${decPart}`;
 }
 
+// 총액/마진 등 합계성 금액 표시용 — 소수점 둘째 자리까지 반올림 (단가 자체는 formatPrice의 5자리 유지)
+function formatMoney2(value, currency) {
+  if (value === null || value === undefined || value === "") return "-";
+  const symbol = CURRENCY_SYMBOL[currency] || "";
+  const num = Number(value ?? 0);
+  const fixed = num.toFixed(2);
+  const [intPart, decPart] = fixed.split(".");
+  const withComma = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${symbol}${withComma}.${decPart}`;
+}
+
 function formatQty(value) {
   return Number(value ?? 0).toLocaleString("ko-KR");
 }
@@ -134,7 +145,7 @@ async function deleteRecord(table, id, confirmMessage) {
 }
 
 // 고객사 → 구분(Sample/MP) → 모델명 → (옵션) 최신 날짜순 정렬로 그룹핑 (4단계 아코디언용)
-function groupByCustomerTypeModel(rows, dateField) {
+function groupByCustomerTypeModel(rows, dateField, customerRankMap) {
   const byCustomer = new Map();
   for (const r of rows) {
     const type = r.product_type || "mp";
@@ -147,7 +158,15 @@ function groupByCustomerTypeModel(rows, dateField) {
   }
 
   return Array.from(byCustomer.entries())
-    .sort((a, b) => a[0].localeCompare(b[0], "ko"))
+    .sort((a, b) => {
+      if (customerRankMap) {
+        const ra = customerRankMap.get(a[0]);
+        const rb = customerRankMap.get(b[0]);
+        const diff = (ra ?? Infinity) - (rb ?? Infinity);
+        if (diff !== 0) return diff;
+      }
+      return a[0].localeCompare(b[0], "ko");
+    })
     .map(([customer, typeMap]) => {
       const types = Array.from(typeMap.entries())
         .sort((a, b) => (TYPE_ORDER[a[0]] ?? 9) - (TYPE_ORDER[b[0]] ?? 9))
@@ -465,6 +484,128 @@ function RowActions({ onEdit, onDelete }) {
   );
 }
 
+// 숫자 셀 인라인 편집 — 클릭하면 입력칸으로 바뀌고, 저장 시 즉시 DB UPDATE (삭제 후 재입력 금지 원칙 준수)
+function InlineNumberCell({ value, onSave, className = "" }) {
+  const [editing, setEditing] = useState(false);
+  const [input, setInput] = useState(String(value ?? 0));
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setInput(String(value ?? 0));
+  }, [value]);
+
+  const save = async () => {
+    setSaving(true);
+    await onSave(Number(input) || 0);
+    setSaving(false);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center justify-end gap-1">
+        <input
+          type="number"
+          min="0"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          autoFocus
+          className="w-20 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+        />
+        <button onClick={save} disabled={saving} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400 disabled:opacity-60">
+          <Check size={11} />
+        </button>
+        <button
+          onClick={() => setEditing(false)}
+          className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+        >
+          <X size={11} />
+        </button>
+      </div>
+    );
+  }
+  return (
+    <button onClick={() => setEditing(true)} className={`inline-flex items-center gap-1 font-mono hover:text-cyan-300 ${className}`}>
+      {formatQty(value)}
+      <Pencil size={10} />
+    </button>
+  );
+}
+
+// 부대비용 셀 — 클릭하면 통화 선택 + 금액 입력 모달이 뜸
+function ExtraCostCell({ row }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="inline-flex items-center gap-1 font-mono hover:text-cyan-300">
+        {formatMoney2(row.extra_cost, row.extra_cost_currency || "KRW")}
+        <Pencil size={10} />
+      </button>
+      <ExtraCostEditModal open={open} onClose={() => setOpen(false)} row={row} />
+    </>
+  );
+}
+
+function ExtraCostEditModal({ open, onClose, row }) {
+  const [currency, setCurrency] = useState(row?.extra_cost_currency || "KRW");
+  const [value, setValue] = useState(String(row?.extra_cost ?? 0));
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open && row) {
+      setCurrency(row.extra_cost_currency || "KRW");
+      setValue(String(row.extra_cost ?? 0));
+    }
+  }, [open, row]);
+
+  const save = async () => {
+    setSaving(true);
+    const { error } = await supabase
+      .from("shipments")
+      .update({ extra_cost: Number(value) || 0, extra_cost_currency: currency })
+      .eq("id", row.id);
+    setSaving(false);
+    if (handleSupabaseError(error, "부대비용 수정")) return;
+    notifyToast("success", "부대비용이 수정되었습니다.");
+    onClose();
+  };
+
+  if (!row) return null;
+
+  return (
+    <Modal open={open} title="부대비용 수정" onClose={onClose}>
+      <Field label="거래화폐">
+        <select className={inputClass} value={currency} onChange={(e) => setCurrency(e.target.value)}>
+          <option value="KRW">KRW (₩)</option>
+          <option value="USD">USD ($)</option>
+        </select>
+      </Field>
+      <Field label="부대비용 금액">
+        <input
+          type="number"
+          step="0.01"
+          min="0"
+          className={`${inputClass} text-right font-mono`}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      </Field>
+      <p className="mb-2 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
+        물류비·관세 등 출고 시점에 확정되지 않는 비용을 나중에 등록/수정할 때 사용합니다. 매입가·판매가와 다른
+        통화로 지출된 경우에도 정확히 표기할 수 있습니다.
+      </p>
+      <div className="mt-2 flex justify-end gap-2">
+        <button onClick={onClose} className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
+          취소
+        </button>
+        <PrimaryButton onClick={save} className={saving ? "opacity-60" : ""}>
+          {saving ? "저장 중..." : "저장"}
+        </PrimaryButton>
+      </div>
+    </Modal>
+  );
+}
+
 // 1단계: 고객사
 function GroupHeader({ label, count, collapsed, onToggle }) {
   return (
@@ -711,6 +852,18 @@ export default function App() {
   }, []);
 
   /* ---------------- 고객사별 요약 (Sample+MP 통합, 모델명 breakdown) ---------------- */
+  // 고객사별 총 판매가(매출액) 순위 — 매출 높은 고객사가 먼저 노출되도록 전체 화면에서 공용으로 사용
+  const customerRevenueRank = useMemo(() => {
+    const totals = new Map();
+    for (const r of profitRows) {
+      totals.set(r.customer, (totals.get(r.customer) || 0) + Number(r.total_sale || 0));
+    }
+    const sorted = Array.from(totals.entries()).sort((a, b) => b[1] - a[1]);
+    const rank = new Map();
+    sorted.forEach(([customer], i) => rank.set(customer, i));
+    return rank;
+  }, [profitRows]);
+
   const summaryByCustomer = useMemo(() => {
     const map = new Map();
     for (const row of dashboardRows) {
@@ -734,8 +887,14 @@ export default function App() {
         wipQty: Number(row.wip_qty || 0),
       });
     }
-    return Array.from(map.values()).sort((a, b) => a.customer.localeCompare(b.customer, "ko"));
-  }, [dashboardRows]);
+    return Array.from(map.values()).sort((a, b) => {
+      const ra = customerRevenueRank.get(a.customer);
+      const rb = customerRevenueRank.get(b.customer);
+      const diff = (ra ?? Infinity) - (rb ?? Infinity);
+      if (diff !== 0) return diff;
+      return a.customer.localeCompare(b.customer, "ko");
+    });
+  }, [dashboardRows, customerRevenueRank]);
 
   // 고객사+구분+모델명 → 발주잔량/재공/재고 조회용
   const productLookup = useMemo(() => {
@@ -775,6 +934,31 @@ export default function App() {
     shipmentRows.forEach(addRev);
     const result = new Map();
     for (const [k, set] of sets) result.set(k, Array.from(set).sort((a, b) => a.localeCompare(b, "ko")));
+    return result;
+  }, [salesRows, shipmentRows]);
+
+  // Sample 모델의 리비전별 수주량/출고량 breakdown (대시보드 상세지표 하위 행 표시용)
+  const revisionBreakdownByModel = useMemo(() => {
+    const map = new Map();
+    const addTo = (r, field) => {
+      if (r.product_type !== "sample" || !r.revision) return;
+      const key = `${r.customer}::${r.product_type}::${r.model_name}`;
+      if (!map.has(key)) map.set(key, new Map());
+      const revMap = map.get(key);
+      if (!revMap.has(r.revision)) revMap.set(r.revision, { ordered: 0, shipped: 0 });
+      revMap.get(r.revision)[field] += Number(r.quantity || 0);
+    };
+    salesRows.forEach((r) => addTo(r, "ordered"));
+    shipmentRows.forEach((r) => addTo(r, "shipped"));
+    const result = new Map();
+    for (const [key, revMap] of map) {
+      result.set(
+        key,
+        Array.from(revMap.entries())
+          .map(([revision, v]) => ({ revision, ...v }))
+          .sort((a, b) => a.revision.localeCompare(b.revision, "ko"))
+      );
+    }
     return result;
   }, [salesRows, shipmentRows]);
 
@@ -855,12 +1039,15 @@ export default function App() {
             shipmentRows={shipmentRows}
             profitRows={profitRows}
             revisionsByModel={revisionsByModel}
+            revisionBreakdownByModel={revisionBreakdownByModel}
+            customerRevenueRank={customerRevenueRank}
           />
         )}
         {tab === "sales" && (
           <SalesHistoryTab
             rows={salesRows}
             productLookup={productLookup}
+            customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("sales", row)}
             onRefresh={fetchSales}
           />
@@ -869,6 +1056,7 @@ export default function App() {
           <ShipmentHistoryTab
             rows={shipmentRows}
             productLookup={productLookup}
+            customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("shipment", row)}
             onRefresh={fetchShipments}
           />
@@ -877,6 +1065,7 @@ export default function App() {
           <MaterialHistoryTab
             rows={materialRows}
             productLookup={productLookup}
+            customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("material", row)}
             onRefresh={fetchMaterials}
           />
@@ -885,6 +1074,7 @@ export default function App() {
           <PriceHistoryTab
             rows={priceHistoryRows}
             productLookup={productLookup}
+            customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("price", row)}
             onRefresh={fetchPriceHistory}
           />
@@ -916,8 +1106,8 @@ export default function App() {
 /* =========================================================================
    대시보드 탭 (고객사 → 구분 → 모델명 3단계 아코디언 + 기간필터 엑셀)
    ========================================================================= */
-function DashboardTab({ rows, summary, shipmentRows, profitRows, revisionsByModel }) {
-  const grouped = useMemo(() => groupByCustomerTypeModel(rows), [rows]);
+function DashboardTab({ rows, summary, shipmentRows, profitRows, revisionsByModel, revisionBreakdownByModel, customerRevenueRank }) {
+  const grouped = useMemo(() => groupByCustomerTypeModel(rows, undefined, customerRevenueRank), [rows, customerRevenueRank]);
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
   const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
   const [collapsedModels, setCollapsedModels] = useState(() => new Set());
@@ -1143,7 +1333,12 @@ function DashboardTab({ rows, summary, shipmentRows, profitRows, revisionsByMode
                                           />
                                         </td>
                                       </tr>
-                                      {!modelCollapsed && <DashboardDetailRow row={r} />}
+                                      {!modelCollapsed && (
+                                        <DashboardDetailRow
+                                          row={r}
+                                          revisionBreakdown={t.type === "sample" ? revisionBreakdownByModel?.get(modelKey) : undefined}
+                                        />
+                                      )}
                                     </React.Fragment>
                                   );
                                 })}
@@ -1218,30 +1413,18 @@ function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }
       <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
         <div className="text-center">
           <div className="text-[11px] text-slate-500">총 매입가</div>
-          <div className="mt-1 font-mono text-xs font-semibold text-slate-300">
-            <span className="text-slate-500">$</span> {formatQty(Math.round(p.purchaseUSD))}
-          </div>
-          <div className="font-mono text-xs font-semibold text-slate-300">
-            <span className="text-slate-500">₩</span> {formatQty(Math.round(p.purchaseKRW))}
-          </div>
+          <div className="mt-1 font-mono text-xs font-semibold text-slate-300">{formatMoney2(p.purchaseUSD, "USD")}</div>
+          <div className="font-mono text-xs font-semibold text-slate-300">{formatMoney2(p.purchaseKRW, "KRW")}</div>
         </div>
         <div className="text-center">
           <div className="text-[11px] text-slate-500">총 판매가</div>
-          <div className="mt-1 font-mono text-xs font-semibold text-cyan-300">
-            <span className="text-slate-500">$</span> {formatQty(Math.round(p.saleUSD))}
-          </div>
-          <div className="font-mono text-xs font-semibold text-cyan-300">
-            <span className="text-slate-500">₩</span> {formatQty(Math.round(p.saleKRW))}
-          </div>
+          <div className="mt-1 font-mono text-xs font-semibold text-cyan-300">{formatMoney2(p.saleUSD, "USD")}</div>
+          <div className="font-mono text-xs font-semibold text-cyan-300">{formatMoney2(p.saleKRW, "KRW")}</div>
         </div>
         <div className="text-center">
           <div className="text-[11px] text-slate-500">총 부대비용</div>
-          <div className="mt-1 font-mono text-xs font-semibold text-amber-400">
-            <span className="text-slate-500">$</span> {formatQty(Math.round(p.extraUSD))}
-          </div>
-          <div className="font-mono text-xs font-semibold text-amber-400">
-            <span className="text-slate-500">₩</span> {formatQty(Math.round(p.extraKRW))}
-          </div>
+          <div className="mt-1 font-mono text-xs font-semibold text-amber-400">{formatMoney2(p.extraUSD, "USD")}</div>
+          <div className="font-mono text-xs font-semibold text-amber-400">{formatMoney2(p.extraKRW, "KRW")}</div>
         </div>
         <div className="col-span-3 flex flex-col items-center justify-center rounded-lg bg-slate-800/40 py-2 sm:col-span-1">
           <div className="text-[11px] text-slate-500">총 이익 (KRW)</div>
@@ -1250,7 +1433,7 @@ function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }
               (marginKrw?.marginKrw || 0) >= 0 ? "text-emerald-400" : "text-red-400"
             }`}
           >
-            ₩ {formatQty(Math.round(marginKrw?.marginKrw || 0))}
+            {formatMoney2(marginKrw?.marginKrw || 0, "KRW")}
           </div>
           {marginKrw?.hasNull && <div className="mt-0.5 text-[10px] text-amber-400">일부 환율 미입력</div>}
         </div>
@@ -1296,7 +1479,7 @@ function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }
 }
 
 // 메인 현황 테이블의 모델별 "상세 지표" 행 — 원자재재고 직접수정 + 대기→재고 FIFO 전환 인라인 편집
-function DashboardDetailRow({ row }) {
+function DashboardDetailRow({ row, revisionBreakdown }) {
   const [editingStock, setEditingStock] = useState(false);
   const [stockInput, setStockInput] = useState(String(row.material_stock ?? 0));
   const [editingWaiting, setEditingWaiting] = useState(false);
@@ -1369,6 +1552,7 @@ function DashboardDetailRow({ row }) {
   };
 
   return (
+    <>
     <tr className="hover:bg-slate-800/40">
       <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">상세 지표</td>
       <td className="px-4 py-3 text-right">{formatQty(row.total_order_qty)}</td>
@@ -1504,17 +1688,79 @@ function DashboardDetailRow({ row }) {
         )}
       </td>
     </tr>
+    {revisionBreakdown && revisionBreakdown.length > 0 &&
+      revisionBreakdown.map((rev) => (
+        <tr key={rev.revision} className="bg-purple-500/[0.03] hover:bg-purple-500/[0.06]">
+          <td className="px-4 py-3 pl-16 font-sans text-xs">
+            <span className="inline-flex items-center gap-1 rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-300">
+              {rev.revision}
+            </span>
+          </td>
+          <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">{formatQty(rev.ordered)}</td>
+          <td className="px-4 py-3 text-right font-mono text-xs text-slate-600" colSpan={2}>
+            -
+          </td>
+          <td className="px-4 py-3 text-right font-mono text-xs text-emerald-400/80">{formatQty(rev.shipped)}</td>
+          <td className="px-4 py-3 text-right font-mono text-xs text-amber-400/80">
+            {formatQty(Math.max(0, rev.ordered - rev.shipped))}
+          </td>
+          <td className="px-4 py-3 text-right font-mono text-xs text-slate-600" colSpan={2}>
+            -
+          </td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+// 날짜순(Flat) 정렬 모드에서 그룹 헤더가 없는 대신, 행 맨 앞에 고객사/모델명을 표시
+function FlatLeadCells({ row }) {
+  return (
+    <>
+      <td className="px-4 py-3 text-left text-slate-300">{row.customer}</td>
+      <td className="px-4 py-3 text-left">
+        <span className="flex items-center gap-1.5">
+          <TypeBadge type={row.product_type} />
+          <span className="font-bold text-slate-100">{row.model_name}</span>
+          {row.revision && (
+            <span className="rounded bg-purple-500/10 px-1 py-0.5 text-[10px] font-medium text-purple-300">{row.revision}</span>
+          )}
+        </span>
+      </td>
+    </>
   );
 }
 
 /* =========================================================================
    내역 조회 탭 공용: 고객사(1) → 구분(2) → 모델명(3) 아코디언 + 기간필터 엑셀
    ========================================================================= */
-function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, exportConfig, productLookup }) {
-  const grouped = useMemo(() => groupByCustomerTypeModel(rows, dateField), [rows, dateField]);
+function GroupedHistoryTable({
+  columns,
+  rows,
+  dateField,
+  renderRow,
+  emptyLabel,
+  exportConfig,
+  productLookup,
+  customerRankMap,
+  enableSortToggle,
+  sortDateLabel,
+}) {
+  const [viewMode, setViewMode] = useState("grouped"); // 'grouped' | 'flat'
+  const [flatStart, setFlatStart] = useState("");
+  const [flatEnd, setFlatEnd] = useState("");
+
+  const grouped = useMemo(() => groupByCustomerTypeModel(rows, dateField, customerRankMap), [rows, dateField, customerRankMap]);
+
   const [collapsedCustomers, setCollapsedCustomers] = useState(() => new Set());
   const [collapsedTypes, setCollapsedTypes] = useState(() => new Set());
-  const [collapsedModels, setCollapsedModels] = useState(() => new Set());
+  // 모델 단위는 기본적으로 "접힘" 상태로 시작 (스크롤 장대화 방지)
+  const [collapsedModels, setCollapsedModels] = useState(() => {
+    const initial = groupByCustomerTypeModel(rows, dateField, customerRankMap);
+    const keys = new Set();
+    initial.forEach((g) => g.types.forEach((t) => t.models.forEach((m) => keys.add(`${g.customer}::${t.type}::${m.model_name}`))));
+    return keys;
+  });
   const [exportModalOpen, setExportModalOpen] = useState(false);
 
   const toggleCustomer = (customer) =>
@@ -1536,24 +1782,68 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
       return next;
     });
 
+  const flatRows = useMemo(() => {
+    if (viewMode !== "flat") return [];
+    const filtered = filterRowsByDateRange(rows, dateField, flatStart || null, flatEnd || null);
+    return [...filtered].sort((a, b) => (b[dateField] || "").localeCompare(a[dateField] || ""));
+  }, [viewMode, rows, dateField, flatStart, flatEnd]);
+
   const handleExport = (start, end) => {
+    if (viewMode === "flat") {
+      const filtered = filterRowsByDateRange(rows, dateField, start, end);
+      const sorted = [...filtered].sort((a, b) => (b[dateField] || "").localeCompare(a[dateField] || ""));
+      exportToExcel(exportConfig.filename, sorted, exportConfig.columns);
+      return;
+    }
     const filtered = filterRowsByDateRange(rows, dateField, start, end);
-    const filteredGrouped = groupByCustomerTypeModel(filtered, dateField);
+    const filteredGrouped = groupByCustomerTypeModel(filtered, dateField, customerRankMap);
     exportToExcel(exportConfig.filename, flattenGroupedTyped(filteredGrouped), exportConfig.columns);
   };
 
   return (
     <div>
-      {exportConfig && (
-        <div className="mb-3 flex justify-end">
-          <ExportButton onClick={() => setExportModalOpen(true)} />
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-2">
+          {enableSortToggle && (
+            <Field label="정렬">
+              <select className={`${inputClass} w-40`} value={viewMode} onChange={(e) => setViewMode(e.target.value)}>
+                <option value="grouped">제조사 정렬 (기본)</option>
+                <option value="flat">날짜순 정렬</option>
+              </select>
+            </Field>
+          )}
+          {enableSortToggle && viewMode === "flat" && (
+            <>
+              <Field label="시작일">
+                <input type="date" className={inputClass} value={flatStart} onChange={(e) => setFlatStart(e.target.value)} />
+              </Field>
+              <Field label="종료일">
+                <input type="date" className={inputClass} value={flatEnd} onChange={(e) => setFlatEnd(e.target.value)} />
+              </Field>
+              {(flatStart || flatEnd) && (
+                <button
+                  onClick={() => {
+                    setFlatStart("");
+                    setFlatEnd("");
+                  }}
+                  className="mb-3 rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
+                >
+                  필터 초기화
+                </button>
+              )}
+            </>
+          )}
         </div>
-      )}
+        {exportConfig && <ExportButton onClick={() => setExportModalOpen(true)} />}
+      </div>
+
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[980px] text-sm">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-800/50 text-xs font-medium uppercase tracking-wide text-slate-400">
+                {viewMode === "flat" && <th className="px-4 py-3 text-left">고객사</th>}
+                {viewMode === "flat" && <th className="px-4 py-3 text-left">모델명</th>}
                 {columns.map((c) => (
                   <th key={c.label} className={`px-4 py-3 ${ALIGN_CLASS[c.align] || "text-left"}`}>
                     {c.label}
@@ -1562,7 +1852,17 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/70">
-              {rows.length === 0 ? (
+              {viewMode === "flat" ? (
+                flatRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={columns.length + 2} className="px-4 py-10 text-center text-slate-500">
+                      {sortDateLabel ? `${sortDateLabel} 기준으로 표시할 데이터가 없습니다.` : emptyLabel}
+                    </td>
+                  </tr>
+                ) : (
+                  flatRows.map((r) => renderRow(r, true))
+                )
+              ) : rows.length === 0 ? (
                 <tr>
                   <td colSpan={columns.length} className="px-4 py-10 text-center text-slate-500">
                     {emptyLabel}
@@ -1615,7 +1915,7 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
                                         />
                                       </td>
                                     </tr>
-                                    {!modelCollapsed && m.rows.map(renderRow)}
+                                    {!modelCollapsed && m.rows.map((row) => renderRow(row, false))}
                                   </React.Fragment>
                                 );
                               })}
@@ -1635,96 +1935,50 @@ function GroupedHistoryTable({ columns, rows, dateField, renderRow, emptyLabel, 
           open={exportModalOpen}
           onClose={() => setExportModalOpen(false)}
           onConfirm={handleExport}
-          dateHint={exportConfig.dateHint}
+          dateHint={viewMode === "flat" ? `${sortDateLabel || "날짜"} 기준으로 필터링합니다 (현재 화면의 날짜순 필터와 별개로 동작).` : exportConfig.dateHint}
         />
       )}
     </div>
   );
 }
 
-function SalesHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
-  const handleDelete = async (row) => {
-    const ok = await deleteRecord("sales_orders", row.id, `${row.customer} / ${row.model_name} 수주 내역을 삭제할까요?`);
-    if (ok) onRefresh();
-  };
-
-  return (
-    <GroupedHistoryTable
-      columns={[
-        { label: "제조사", align: "left" },
-        { label: "리비전", align: "left" },
-        { label: "수주일", align: "center" },
-        { label: "수량", align: "right" },
-        { label: "작업", align: "center" },
-      ]}
-      rows={rows}
-      dateField="order_date"
-      productLookup={productLookup}
-      emptyLabel="수주 내역이 없습니다."
-      exportConfig={{
-        filename: "수주내역.xlsx",
-        dateHint: "수주일 기준으로 필터링합니다.",
-        columns: [
-          { header: "고객사", accessor: (r) => r.customer },
-          { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
-          { header: "모델명", accessor: (r) => r.model_name },
-          { header: "리비전", accessor: (r) => r.revision || "" },
-          { header: "제조사", accessor: (r) => r.manufacturer || "" },
-          { header: "수량", accessor: (r) => r.quantity },
-          { header: "수주일", accessor: (r) => r.order_date },
-        ],
-      }}
-      renderRow={(r) => (
-        <tr key={r.id} className="hover:bg-slate-800/40">
-          <td className="px-4 py-3 text-left text-slate-400">{r.manufacturer || "-"}</td>
-          <td className="px-4 py-3 text-left text-slate-400">{r.revision || "-"}</td>
-          <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.order_date)}</td>
-          <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
-          <td className="px-4 py-3 text-center">
-            <RowActions onEdit={() => onEdit(r)} onDelete={() => handleDelete(r)} />
-          </td>
-        </tr>
-      )}
-    />
-  );
-}
-
-function ShipmentRowCells({ row, onSaveExtraCost, onEdit, onDelete }) {
-  const [extraCostInput, setExtraCostInput] = useState(String(row.extra_cost ?? 0));
+function SalesRowCells({ row, flatMode, onSaveQuantity, onEdit, onDelete }) {
+  const [qtyInput, setQtyInput] = useState(String(row.quantity ?? 0));
 
   useEffect(() => {
-    setExtraCostInput(String(row.extra_cost ?? 0));
-  }, [row.extra_cost]);
+    setQtyInput(String(row.quantity ?? 0));
+  }, [row.quantity]);
 
-  const dirty = Number(extraCostInput || 0) !== Number(row.extra_cost || 0);
+  const dirty = Number(qtyInput || 0) !== Number(row.quantity || 0);
 
   const save = async () => {
-    const val = Math.max(0, Number(extraCostInput) || 0);
-    await onSaveExtraCost(row, val);
+    const val = Math.max(0, Number(qtyInput) || 0);
+    if (val <= 0) {
+      notifyToast("error", "수량은 0보다 커야 합니다.");
+      return;
+    }
+    await onSaveQuantity(row, val);
   };
 
   return (
-    <tr className="hover:bg-slate-800/40">
+    <tr key={row.id} className="hover:bg-slate-800/40">
+      {flatMode && <FlatLeadCells row={row} />}
       <td className="px-4 py-3 text-left text-slate-400">{row.manufacturer || "-"}</td>
       <td className="px-4 py-3 text-left text-slate-400">{row.revision || "-"}</td>
-      <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(row.shipment_date)}</td>
-      <td className="px-4 py-3 text-right font-mono">{formatQty(row.quantity)}</td>
-      <td className="px-4 py-3 text-right font-mono">{formatPrice(row.purchase_price, row.purchase_currency)}</td>
-      <td className="px-4 py-3 text-right font-mono">{formatPrice(row.sale_price, row.sale_currency)}</td>
+      <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(row.order_date)}</td>
       <td className="px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1.5">
           <input
             type="number"
             min="0"
-            step="0.01"
-            value={extraCostInput}
-            onChange={(e) => setExtraCostInput(e.target.value)}
+            value={qtyInput}
+            onChange={(e) => setQtyInput(e.target.value)}
             className="w-20 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
           />
           {dirty && (
             <button
               onClick={save}
-              title="부대비용 저장"
+              title="수량 저장"
               className="inline-flex items-center rounded-md bg-cyan-500 px-1.5 py-1 text-slate-950 hover:bg-cyan-400"
             >
               <Check size={12} />
@@ -1739,7 +1993,119 @@ function ShipmentRowCells({ row, onSaveExtraCost, onEdit, onDelete }) {
   );
 }
 
-function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
+function SalesHistoryTab({ rows, productLookup, customerRankMap, onEdit, onRefresh }) {
+  const handleDelete = async (row) => {
+    const ok = await deleteRecord("sales_orders", row.id, `${row.customer} / ${row.model_name} 수주 내역을 삭제할까요?`);
+    if (ok) onRefresh();
+  };
+
+  const handleSaveQuantity = async (row, quantity) => {
+    const { error } = await supabase.from("sales_orders").update({ quantity }).eq("id", row.id);
+    if (handleSupabaseError(error, "수주 수량 수정")) return;
+    notifyToast("success", "수주 수량이 수정되었습니다.");
+    onRefresh();
+  };
+
+  return (
+    <GroupedHistoryTable
+      columns={[
+        { label: "제조사", align: "left" },
+        { label: "리비전", align: "left" },
+        { label: "수주일", align: "center" },
+        { label: "수량", align: "right" },
+        { label: "작업", align: "center" },
+      ]}
+      rows={rows}
+      dateField="order_date"
+      productLookup={productLookup}
+      customerRankMap={customerRankMap}
+      enableSortToggle
+      sortDateLabel="수주일"
+      emptyLabel="수주 내역이 없습니다."
+      exportConfig={{
+        filename: "수주내역.xlsx",
+        dateHint: "수주일 기준으로 필터링합니다.",
+        columns: [
+          { header: "고객사", accessor: (r) => r.customer },
+          { header: "구분", accessor: (r) => TYPE_LABEL[r.product_type] || r.product_type },
+          { header: "모델명", accessor: (r) => r.model_name },
+          { header: "리비전", accessor: (r) => r.revision || "" },
+          { header: "제조사", accessor: (r) => r.manufacturer || "" },
+          { header: "수량", accessor: (r) => r.quantity },
+          { header: "수주일", accessor: (r) => r.order_date },
+        ],
+      }}
+      renderRow={(r, flatMode) => (
+        <SalesRowCells
+          key={r.id}
+          row={r}
+          flatMode={flatMode}
+          onSaveQuantity={handleSaveQuantity}
+          onEdit={onEdit}
+          onDelete={handleDelete}
+        />
+      )}
+    />
+  );
+}
+
+function ShipmentRowCells({ row, flatMode, onSaveQuantity, onEdit, onDelete }) {
+  const [qtyInput, setQtyInput] = useState(String(row.quantity ?? 0));
+
+  useEffect(() => {
+    setQtyInput(String(row.quantity ?? 0));
+  }, [row.quantity]);
+
+  const dirty = Number(qtyInput || 0) !== Number(row.quantity || 0);
+
+  const save = async () => {
+    const val = Math.max(0, Number(qtyInput) || 0);
+    if (val <= 0) {
+      notifyToast("error", "수량은 0보다 커야 합니다.");
+      return;
+    }
+    await onSaveQuantity(row, val);
+  };
+
+  return (
+    <tr className="hover:bg-slate-800/40">
+      {flatMode && <FlatLeadCells row={row} />}
+      <td className="px-4 py-3 text-left text-slate-400">{row.manufacturer || "-"}</td>
+      <td className="px-4 py-3 text-left text-slate-400">{row.revision || "-"}</td>
+      <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(row.shipment_date)}</td>
+      <td className="px-4 py-3 text-right">
+        <div className="flex items-center justify-end gap-1.5">
+          <input
+            type="number"
+            min="0"
+            value={qtyInput}
+            onChange={(e) => setQtyInput(e.target.value)}
+            className="w-20 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+          />
+          {dirty && (
+            <button
+              onClick={save}
+              title="수량 저장"
+              className="inline-flex items-center rounded-md bg-cyan-500 px-1.5 py-1 text-slate-950 hover:bg-cyan-400"
+            >
+              <Check size={12} />
+            </button>
+          )}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-right font-mono">{formatPrice(row.purchase_price, row.purchase_currency)}</td>
+      <td className="px-4 py-3 text-right font-mono">{formatPrice(row.sale_price, row.sale_currency)}</td>
+      <td className="px-4 py-3 text-right">
+        <ExtraCostCell row={row} />
+      </td>
+      <td className="px-4 py-3 text-center">
+        <RowActions onEdit={() => onEdit(row)} onDelete={() => onDelete(row)} />
+      </td>
+    </tr>
+  );
+}
+
+function ShipmentHistoryTab({ rows, productLookup, customerRankMap, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "shipments",
@@ -1749,10 +2115,10 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
     if (ok) onRefresh();
   };
 
-  const handleSaveExtraCost = async (row, extraCost) => {
-    const { error } = await supabase.from("shipments").update({ extra_cost: extraCost }).eq("id", row.id);
-    if (handleSupabaseError(error, "부대비용 저장")) return;
-    notifyToast("success", "부대비용이 저장되었습니다.");
+  const handleSaveQuantity = async (row, quantity) => {
+    const { error } = await supabase.from("shipments").update({ quantity }).eq("id", row.id);
+    if (handleSupabaseError(error, "출고 수량 수정")) return;
+    notifyToast("success", "출고 수량이 수정되었습니다.");
     onRefresh();
   };
 
@@ -1771,6 +2137,9 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       rows={rows}
       dateField="shipment_date"
       productLookup={productLookup}
+      customerRankMap={customerRankMap}
+      enableSortToggle
+      sortDateLabel="출고일"
       emptyLabel="출고 내역이 없습니다."
       exportConfig={{
         filename: "출고내역.xlsx",
@@ -1787,29 +2156,51 @@ function ShipmentHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
           { header: "판매가", accessor: (r) => r.sale_price },
           { header: "판매통화", accessor: (r) => r.sale_currency },
           { header: "부대비용", accessor: (r) => r.extra_cost || 0 },
+          { header: "부대비용통화", accessor: (r) => r.extra_cost_currency || "KRW" },
           { header: "출고일", accessor: (r) => r.shipment_date },
         ],
       }}
-      renderRow={(r) => (
-        <ShipmentRowCells key={r.id} row={r} onSaveExtraCost={handleSaveExtraCost} onEdit={onEdit} onDelete={handleDelete} />
+      renderRow={(r, flatMode) => (
+        <ShipmentRowCells
+          key={r.id}
+          row={r}
+          flatMode={flatMode}
+          onSaveQuantity={handleSaveQuantity}
+          onEdit={onEdit}
+          onDelete={handleDelete}
+        />
       )}
     />
   );
 }
 
-function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
+function MaterialRowCells({ row, flatMode, onSaveReceived, onSaveQuantity, onEdit, onDelete }) {
   const [receivedInput, setReceivedInput] = useState(String(row.received_qty ?? 0));
+  const [qtyInput, setQtyInput] = useState(String(row.quantity ?? 0));
 
   useEffect(() => {
     setReceivedInput(String(row.received_qty ?? 0));
   }, [row.received_qty]);
+  useEffect(() => {
+    setQtyInput(String(row.quantity ?? 0));
+  }, [row.quantity]);
 
   const pending = Math.max(0, Number(row.quantity || 0) - Number(row.received_qty || 0));
-  const dirty = Number(receivedInput || 0) !== Number(row.received_qty || 0);
+  const receivedDirty = Number(receivedInput || 0) !== Number(row.received_qty || 0);
+  const qtyDirty = Number(qtyInput || 0) !== Number(row.quantity || 0);
 
-  const save = async () => {
+  const saveReceived = async () => {
     const clamped = Math.min(Math.max(0, Number(receivedInput) || 0), Number(row.quantity || 0));
     await onSaveReceived(row, clamped);
+  };
+
+  const saveQuantity = async () => {
+    const val = Math.max(0, Number(qtyInput) || 0);
+    if (val <= 0) {
+      notifyToast("error", "발주수량은 0보다 커야 합니다.");
+      return;
+    }
+    await onSaveQuantity(row, val);
   };
 
   const statusStyle =
@@ -1821,9 +2212,29 @@ function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
 
   return (
     <tr className="hover:bg-slate-800/40">
+      {flatMode && <FlatLeadCells row={row} />}
       <td className="px-4 py-3 text-left text-slate-400">{row.material_maker || "-"}</td>
       <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(row.order_date)}</td>
-      <td className="px-4 py-3 text-right font-mono">{formatQty(row.quantity)}</td>
+      <td className="px-4 py-3 text-right">
+        <div className="flex items-center justify-end gap-1.5">
+          <input
+            type="number"
+            min="0"
+            value={qtyInput}
+            onChange={(e) => setQtyInput(e.target.value)}
+            className="w-20 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+          />
+          {qtyDirty && (
+            <button
+              onClick={saveQuantity}
+              title="발주수량 저장"
+              className="inline-flex items-center rounded-md bg-cyan-500 px-1.5 py-1 text-slate-950 hover:bg-cyan-400"
+            >
+              <Check size={12} />
+            </button>
+          )}
+        </div>
+      </td>
       <td className="px-4 py-3 text-right">
         <div className="flex items-center justify-end gap-1.5">
           <input
@@ -1834,9 +2245,9 @@ function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
             onChange={(e) => setReceivedInput(e.target.value)}
             className="w-24 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
           />
-          {dirty && (
+          {receivedDirty && (
             <button
-              onClick={save}
+              onClick={saveReceived}
               title="입고수량 저장"
               className="inline-flex items-center rounded-md bg-cyan-500 px-1.5 py-1 text-slate-950 hover:bg-cyan-400"
             >
@@ -1859,7 +2270,7 @@ function MaterialRowCells({ row, onSaveReceived, onEdit, onDelete }) {
   );
 }
 
-function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
+function MaterialHistoryTab({ rows, productLookup, customerRankMap, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const ok = await deleteRecord(
       "material_orders",
@@ -1873,6 +2284,13 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
     const { error } = await supabase.from("material_orders").update({ received_qty: receivedQty }).eq("id", row.id);
     if (handleSupabaseError(error, "입고수량 저장")) return;
     notifyToast("success", "입고수량이 저장되었습니다.");
+    onRefresh();
+  };
+
+  const handleSaveQuantity = async (row, quantity) => {
+    const { error } = await supabase.from("material_orders").update({ quantity }).eq("id", row.id);
+    if (handleSupabaseError(error, "발주수량 수정")) return;
+    notifyToast("success", "발주수량이 수정되었습니다.");
     onRefresh();
   };
 
@@ -1890,6 +2308,9 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       rows={rows}
       dateField="order_date"
       productLookup={productLookup}
+      customerRankMap={customerRankMap}
+      enableSortToggle
+      sortDateLabel="발주일"
       emptyLabel="원자재 발주 내역이 없습니다."
       exportConfig={{
         filename: "원자재발주내역.xlsx",
@@ -1906,14 +2327,22 @@ function MaterialHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
           { header: "상태", accessor: (r) => r.status },
         ],
       }}
-      renderRow={(r) => (
-        <MaterialRowCells key={r.id} row={r} onSaveReceived={handleSaveReceived} onEdit={onEdit} onDelete={handleDelete} />
+      renderRow={(r, flatMode) => (
+        <MaterialRowCells
+          key={r.id}
+          row={r}
+          flatMode={flatMode}
+          onSaveReceived={handleSaveReceived}
+          onSaveQuantity={handleSaveQuantity}
+          onEdit={onEdit}
+          onDelete={handleDelete}
+        />
       )}
     />
   );
 }
 
-function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
+function PriceHistoryTab({ rows, productLookup, customerRankMap, onEdit, onRefresh }) {
   const handleDelete = async (row) => {
     const message =
       row.source === "shipment"
@@ -1936,6 +2365,7 @@ function PriceHistoryTab({ rows, productLookup, onEdit, onRefresh }) {
       rows={rows}
       dateField="effective_date"
       productLookup={productLookup}
+      customerRankMap={customerRankMap}
       emptyLabel="단가 변동 이력이 없습니다."
       exportConfig={{
         filename: "단가이력.xlsx",
@@ -2087,14 +2517,14 @@ function ProfitTab({ rows }) {
                     </td>
                     <td className="px-4 py-3 text-center font-mono text-slate-300">{formatDate(r.shipment_date)}</td>
                     <td className="px-4 py-3 text-right font-mono">{formatQty(r.quantity)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.total_sale, r.sale_currency)}</td>
-                    <td className="px-4 py-3 text-right font-mono">{formatPrice(r.total_extra_cost, r.sale_currency)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatMoney2(r.total_sale, r.sale_currency)}</td>
+                    <td className="px-4 py-3 text-right font-mono">{formatMoney2(r.total_extra_cost, r.sale_currency)}</td>
                     <td
                       className={`px-4 py-3 text-right font-mono text-base font-bold ${
                         r.margin >= 0 ? "text-emerald-400" : "text-red-400"
                       }`}
                     >
-                      {formatPrice(r.margin, r.sale_currency)}
+                      {formatMoney2(r.margin, r.sale_currency)}
                     </td>
                     <td className="px-4 py-3 text-right">
                       {r.margin_krw === null || r.margin_krw === undefined ? (
@@ -2106,7 +2536,7 @@ function ProfitTab({ rows }) {
                               r.margin_krw >= 0 ? "text-blue-400" : "text-red-400"
                             }`}
                           >
-                            {formatPrice(r.margin_krw, "KRW")}
+                            {formatMoney2(r.margin_krw, "KRW")}
                           </span>
                           {r.margin_krw_is_temp && (
                             <span className="rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-400">
