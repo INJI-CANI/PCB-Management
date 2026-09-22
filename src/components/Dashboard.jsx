@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { Check, Pencil, X, Building2 } from "lucide-react";
 import {
   formatMoney2,
