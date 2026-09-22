@@ -594,6 +594,10 @@ export function StockEditModal({ open, onClose, products, initial }) {
   const [stock, setStock] = useState("0");
   const [saving, setSaving] = useState(false);
 
+  // Sample 모델은 리비전별로 재고/재공을 따로 관리하므로, 이 모달(모델 전체 통합 수정)에서는
+  // 제외하고 대시보드의 리비전별 인라인 수정으로 유도합니다. MP만 선택 가능합니다.
+  const editableProducts = products.filter((p) => p.product_type !== "sample");
+
   useEffect(() => {
     if (!open) return;
     if (initial && initial.id) {
@@ -609,7 +613,7 @@ export function StockEditModal({ open, onClose, products, initial }) {
 
   const onSelectProduct = (id) => {
     setSelectedId(id);
-    const p = products.find((r) => r.id === id);
+    const p = editableProducts.find((r) => r.id === id);
     if (p) {
       setWip(String(p.wip_qty ?? 0));
       setStock(String(p.product_stock ?? 0));
@@ -631,11 +635,16 @@ export function StockEditModal({ open, onClose, products, initial }) {
   };
 
   return (
-    <Modal open={open} title="재공 / 제품재고 수정" onClose={onClose}>
-      <Field label="모델 선택 (고객사 - 구분 - 모델명)">
+    <Modal open={open} title="재공 / 제품재고 수정 (MP 전용)" onClose={onClose}>
+      <p className="mb-2 flex items-start gap-1.5 rounded-md bg-slate-800/60 p-2.5 text-xs text-slate-400">
+        <CalendarDays size={13} className="mt-0.5 shrink-0" />
+        Sample 모델은 리비전별로 실물 재고/재공을 따로 관리합니다. 대시보드의 [모델별 실시간 현황]에서
+        해당 모델을 펼친 뒤 리비전별 행에서 직접 수정해주세요.
+      </p>
+      <Field label="모델 선택 (고객사 - 구분 - 모델명, MP만 표시됩니다)">
         <select className={inputClass} value={selectedId} onChange={(e) => onSelectProduct(e.target.value)}>
           <option value="">모델을 선택하세요</option>
-          {products.map((p) => (
+          {editableProducts.map((p) => (
             <option key={p.id} value={p.id}>
               {p.customer} - {TYPE_LABEL[p.product_type] || p.product_type} - {p.model_name}
             </option>
