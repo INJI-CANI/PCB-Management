@@ -193,6 +193,31 @@ export default function App() {
     fetchExchangeRates,
   ]);
 
+  // 수주/출고/원자재 발주 내역을 인라인 수정·삭제한 뒤에는 해당 내역 테이블뿐 아니라
+  // 대시보드(발주잔량/재고/원자재대기 등 파생 수치)도 함께 갱신해야 화면이 즉시 맞아떨어집니다.
+  // (실시간 구독으로도 갱신되지만, 지연 없이 확실하게 반영되도록 명시적으로 같이 호출합니다.)
+  const refreshSales = useCallback(async () => {
+    await Promise.all([fetchSales(), fetchDashboard()]);
+  }, [fetchSales, fetchDashboard]);
+
+  const refreshShipments = useCallback(async () => {
+    await Promise.all([fetchShipments(), fetchDashboard(), fetchProfit()]);
+  }, [fetchShipments, fetchDashboard, fetchProfit]);
+
+  const refreshMaterials = useCallback(async () => {
+    await Promise.all([fetchMaterials(), fetchDashboard()]);
+  }, [fetchMaterials, fetchDashboard]);
+
+  // 업체별 거래조건 / 환율을 입력·수정하면 이익현황(margin_krw)과 원화환산 집계가
+  // 그 즉시 재계산되어야 하므로, 해당 내역만 새로고침하지 않고 이익현황·원화환산까지 함께 갱신합니다.
+  const refreshTradeConditions = useCallback(async () => {
+    await Promise.all([fetchTradeConditions(), fetchProfit(), fetchProjectFinancials()]);
+  }, [fetchTradeConditions, fetchProfit, fetchProjectFinancials]);
+
+  const refreshExchangeRates = useCallback(async () => {
+    await Promise.all([fetchExchangeRates(), fetchProfit(), fetchProjectFinancials()]);
+  }, [fetchExchangeRates, fetchProfit, fetchProjectFinancials]);
+
   useEffect(() => {
     fetchAll();
 
@@ -461,7 +486,7 @@ export default function App() {
             productLookup={productLookup}
             customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("sales", row)}
-            onRefresh={fetchSales}
+            onRefresh={refreshSales}
           />
         )}
         {tab === "shipment" && (
@@ -470,7 +495,7 @@ export default function App() {
             productLookup={productLookup}
             customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("shipment", row)}
-            onRefresh={fetchShipments}
+            onRefresh={refreshShipments}
           />
         )}
         {tab === "material" && (
@@ -479,7 +504,7 @@ export default function App() {
             productLookup={productLookup}
             customerRankMap={customerRevenueRank}
             onEdit={(row) => openEdit("material", row)}
-            onRefresh={fetchMaterials}
+            onRefresh={refreshMaterials}
           />
         )}
         {tab === "price_history" && (
@@ -497,8 +522,8 @@ export default function App() {
             tradeConditions={tradeConditions}
             exchangeRates={exchangeRates}
             onEdit={(row) => openEdit("trade_condition", row)}
-            onRefreshConditions={fetchTradeConditions}
-            onRefreshRates={fetchExchangeRates}
+            onRefreshConditions={refreshTradeConditions}
+            onRefreshRates={refreshExchangeRates}
           />
         )}
       </main>
