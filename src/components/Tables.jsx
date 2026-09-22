@@ -163,7 +163,7 @@ function GroupedHistoryTable({
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           <table className="w-full min-w-[980px] text-sm">
             <thead className="sticky top-0 z-10">
               <tr className="border-b border-slate-800 bg-slate-800 text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -812,7 +812,7 @@ export function ProfitTab({ rows }) {
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           <table className="w-full min-w-[980px] text-sm">
             <thead className="sticky top-0 z-10">
               <tr className="border-b border-slate-800 bg-slate-800 text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -916,7 +916,7 @@ export function TradeConditionsTab({ tradeConditions, exchangeRates, onEdit, onR
       <div>
         <h2 className="mb-3 text-sm font-semibold text-slate-300">업체별 거래조건</h2>
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-          <div className="overflow-x-auto">
+          <div className="max-h-[70vh] overflow-auto">
             <table className="w-full min-w-[720px] text-sm">
               <thead className="sticky top-0 z-10">
                 <tr className="border-b border-slate-800 bg-slate-800 text-xs font-medium uppercase tracking-wide text-slate-400">
