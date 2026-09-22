@@ -56,48 +56,27 @@ export function DashboardTab({ rows, summary, shipmentRows, profitRows, revision
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shipmentRows]);
 
-  // 통화별로 분리된 매입/판매/부대비용 합계 (USD 거래분과 KRW 거래분을 섞지 않음)
-  const profitByCustomer = useMemo(() => {
-    const map = new Map();
-    for (const r of shipmentRows) {
-      const y = Number((r.shipment_date || "").slice(0, 4));
-      if (y !== selectedYear) continue;
-      if (!map.has(r.customer)) {
-        map.set(r.customer, {
-          purchaseUSD: 0,
-          purchaseKRW: 0,
-          saleUSD: 0,
-          saleKRW: 0,
-          extraUSD: 0,
-          extraKRW: 0,
-        });
-      }
-      const cur = map.get(r.customer);
-      const totalPurchase = Number(r.quantity || 0) * Number(r.purchase_price || 0);
-      const totalSale = Number(r.quantity || 0) * Number(r.sale_price || 0);
-      const extra = Number(r.extra_cost || 0);
-
-      if (r.purchase_currency === "USD") cur.purchaseUSD += totalPurchase;
-      else cur.purchaseKRW += totalPurchase;
-
-      if (r.sale_currency === "USD") {
-        cur.saleUSD += totalSale;
-        cur.extraUSD += extra;
-      } else {
-        cur.saleKRW += totalSale;
-        cur.extraKRW += extra;
-      }
-    }
-    return map;
-  }, [shipmentRows, selectedYear]);
-
-  // 총 이익(KRW 환산, 통화 무관 단일 통합값) — profit_view의 margin_krw를 그대로 합산
-  const marginKrwByCustomer = useMemo(() => {
+  // 고객사별 총매입가/총판매가/총부대비용/총이익 — 전부 KRW 환산 단일값 (USD/KRW 분리 표기 폐기)
+  // profit_view가 이미 계산해둔 환율(applied_fx_rate)을 그대로 사용해, 매입/판매/부대비용도
+  // 이익(margin_krw)과 동일한 방식으로 원화 환산합니다.
+  const krwSummaryByCustomer = useMemo(() => {
     const map = new Map();
     for (const r of profitRows) {
       const y = Number((r.shipment_date || "").slice(0, 4));
       if (y !== selectedYear) continue;
-      const cur = map.get(r.customer) || { marginKrw: 0, hasNull: false };
+      const cur = map.get(r.customer) || { purchaseKrw: 0, saleKrw: 0, extraKrw: 0, marginKrw: 0, hasNull: false };
+      const rate = Number(r.applied_fx_rate);
+      const toKrw = (value, currency) => {
+        if (currency === "KRW") return Number(value || 0);
+        if (!rate) {
+          cur.hasNull = true;
+          return 0;
+        }
+        return Number(value || 0) * rate;
+      };
+      cur.purchaseKrw += toKrw(r.total_purchase, r.purchase_currency);
+      cur.saleKrw += toKrw(r.total_sale, r.sale_currency);
+      cur.extraKrw += toKrw(r.total_extra_cost, r.extra_cost_currency);
       if (r.margin_krw === null || r.margin_krw === undefined) {
         cur.hasNull = true;
       } else {
@@ -176,8 +155,7 @@ export function DashboardTab({ rows, summary, shipmentRows, profitRows, revision
             <CustomerSummaryCard
               key={s.customer}
               summary={s}
-              profit={profitByCustomer.get(s.customer)}
-              marginKrw={marginKrwByCustomer.get(s.customer)}
+              krwSummary={krwSummaryByCustomer.get(s.customer)}
               revisionsByModel={revisionsByModel}
             />
           ))}
@@ -295,7 +273,7 @@ export function DashboardTab({ rows, summary, shipmentRows, profitRows, revision
 }
 
 // 고객사 요약 카드: 상단 이익현황(매입/판매/부대비용/이익) + 하단 [원자재 현황]/[발주잔량 현황] 2-Track 전환
-function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }) {
+function CustomerSummaryCard({ summary: s, krwSummary, revisionsByModel }) {
   const [viewMode, setViewMode] = useState("material"); // 'material' | 'balance'
 
   const sortedModels = useMemo(
@@ -310,7 +288,7 @@ function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }
     [s.models]
   );
 
-  const p = profit || { purchaseUSD: 0, purchaseKRW: 0, saleUSD: 0, saleKRW: 0, extraUSD: 0, extraKRW: 0 };
+  const k = krwSummary || { purchaseKrw: 0, saleKrw: 0, extraKrw: 0, marginKrw: 0, hasNull: false };
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
@@ -339,37 +317,39 @@ function CustomerSummaryCard({ summary: s, profit, marginKrw, revisionsByModel }
         </div>
       </div>
 
-      {/* 매입/판매/부대비용 (USD·KRW 2줄 분리) + 총이익 (KRW 단일 병합) */}
-      <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
-        <div className="text-center">
-          <div className="text-[11px] text-slate-500">총 매입가</div>
-          <div className="mt-1 font-mono text-xs font-semibold text-slate-300">{formatMoney2(p.purchaseUSD, "USD")}</div>
-          <div className="font-mono text-xs font-semibold text-slate-300">{formatMoney2(p.purchaseKRW, "KRW")}</div>
-        </div>
-        <div className="text-center">
-          <div className="text-[11px] text-slate-500">총 판매가</div>
-          <div className="mt-1 font-mono text-xs font-semibold text-cyan-300">{formatMoney2(p.saleUSD, "USD")}</div>
-          <div className="font-mono text-xs font-semibold text-cyan-300">{formatMoney2(p.saleKRW, "KRW")}</div>
-        </div>
-        <div className="text-center">
-          <div className="text-[11px] text-slate-500">총 부대비용</div>
-          <div className="mt-1 font-mono text-xs font-semibold text-amber-400">{formatMoney2(p.extraUSD, "USD")}</div>
-          <div className="font-mono text-xs font-semibold text-amber-400">{formatMoney2(p.extraKRW, "KRW")}</div>
-        </div>
-        <div className="col-span-3 flex flex-col items-center justify-center rounded-lg bg-slate-800/40 py-2 sm:col-span-1">
-          <div className="text-[11px] text-slate-500">총 이익 (KRW)</div>
-          <div
-            className={`mt-1 font-mono text-lg font-bold ${
-              (marginKrw?.marginKrw || 0) >= 0 ? "text-emerald-400" : "text-red-400"
-            }`}
-          >
-            {formatMoney2(marginKrw?.marginKrw || 0, "KRW")}
+      {/* 매입가/판매가/부대비용/이익 전부 KRW 환산 단일값, 각 1줄 표기 */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-lg bg-slate-800/40 px-2 py-2.5 text-center">
+          <div className="truncate text-[11px] text-slate-500">총 매입가(KRW)</div>
+          <div className="mt-1 truncate font-mono text-sm font-semibold text-slate-300" title={formatMoney2(k.purchaseKrw, "KRW")}>
+            {formatMoney2(k.purchaseKrw, "KRW")}
           </div>
-          {marginKrw?.hasNull && <div className="mt-0.5 text-[10px] text-amber-400">일부 환율 미입력</div>}
+        </div>
+        <div className="rounded-lg bg-slate-800/40 px-2 py-2.5 text-center">
+          <div className="truncate text-[11px] text-slate-500">총 판매가(KRW)</div>
+          <div className="mt-1 truncate font-mono text-sm font-semibold text-cyan-300" title={formatMoney2(k.saleKrw, "KRW")}>
+            {formatMoney2(k.saleKrw, "KRW")}
+          </div>
+        </div>
+        <div className="rounded-lg bg-slate-800/40 px-2 py-2.5 text-center">
+          <div className="truncate text-[11px] text-slate-500">총 부대비용(KRW)</div>
+          <div className="mt-1 truncate font-mono text-sm font-semibold text-amber-400" title={formatMoney2(k.extraKrw, "KRW")}>
+            {formatMoney2(k.extraKrw, "KRW")}
+          </div>
+        </div>
+        <div className="rounded-lg bg-slate-800/60 px-2 py-2.5 text-center">
+          <div className="truncate text-[11px] text-slate-500">총 이익(KRW)</div>
+          <div
+            className={`mt-1 truncate font-mono text-sm font-bold ${k.marginKrw >= 0 ? "text-emerald-400" : "text-red-400"}`}
+            title={formatMoney2(k.marginKrw, "KRW")}
+          >
+            {formatMoney2(k.marginKrw, "KRW")}
+          </div>
         </div>
       </div>
+      {k.hasNull && <p className="mt-1.5 text-center text-[10px] text-amber-400">일부 환율 미입력 (임시환율 또는 거래조건 확인 필요)</p>}
       <p className="mt-2 text-center text-[10px] text-slate-600">
-        선택 연도 출고 기준 · 총 이익은 업체별 거래조건 환율로 원화 환산된 통합값입니다
+        선택 연도 출고 기준 · 업체별 거래조건 환율로 원화 환산된 통합값입니다
       </p>
 
       <div className="mt-4 space-y-1.5 border-t border-slate-800 pt-3">
