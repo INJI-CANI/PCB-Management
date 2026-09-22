@@ -235,16 +235,29 @@ export default function App() {
   /* ---------------- 고객사별 요약 (Sample+MP 통합, 모델명 breakdown) ---------------- */
   // 고객사별 'KRW 환산 총 판매가' 순위 — project_converted_financials(거래조건/환율 반영 완료)를
   // 그대로 합산해서 정렬 기준으로 사용합니다 (USD/KRW 절대값을 단순 합산하던 이전 방식의 오류를 해결).
+  // 고객사별 'KRW 환산 총 판매가' 순위 — project_converted_financials(거래조건/환율 반영 완료)를
+  // 그대로 합산해서 정렬 기준으로 사용합니다 (USD/KRW 절대값을 단순 합산하던 이전 방식의 오류를 해결).
+  // ⚠️ project_converted_financials 테이블이 아직 비어있거나(마이그레이션 미실행) 존재하지 않는 경우를 대비해,
+  //    profit_view 기반(profitRows)의 동일한 환율 환산 공식으로 임시 계산한 값을 대체 순위로 사용합니다.
   const customerRevenueRank = useMemo(() => {
     const totals = new Map();
-    for (const r of projectFinancials) {
-      totals.set(r.customer, (totals.get(r.customer) || 0) + Number(r.total_sales_krw || 0));
+    if (projectFinancials.length > 0) {
+      for (const r of projectFinancials) {
+        totals.set(r.customer, (totals.get(r.customer) || 0) + Number(r.total_sales_krw || 0));
+      }
+    } else {
+      for (const r of profitRows) {
+        const rate = Number(r.applied_fx_rate);
+        const saleKrw =
+          r.sale_currency === "KRW" ? Number(r.total_sale || 0) : rate ? Number(r.total_sale || 0) * rate : 0;
+        totals.set(r.customer, (totals.get(r.customer) || 0) + saleKrw);
+      }
     }
     const sorted = Array.from(totals.entries()).sort((a, b) => b[1] - a[1]);
     const rank = new Map();
     sorted.forEach(([customer], i) => rank.set(customer, i));
     return rank;
-  }, [projectFinancials]);
+  }, [projectFinancials, profitRows]);
 
   const summaryByCustomer = useMemo(() => {
     const map = new Map();
