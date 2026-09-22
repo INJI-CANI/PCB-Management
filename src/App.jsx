@@ -61,6 +61,7 @@ export default function App() {
   const [projectFinancials, setProjectFinancials] = useState([]);
   const [tradeConditions, setTradeConditions] = useState([]);
   const [exchangeRates, setExchangeRates] = useState([]);
+  const [revisionStockRows, setRevisionStockRows] = useState([]); // Sample 리비전별 실물 재고/재공
   const [loading, setLoading] = useState(true);
   const [lastSync, setLastSync] = useState(null);
 
@@ -167,6 +168,15 @@ export default function App() {
     setExchangeRates(data || []);
   }, []);
 
+  // Sample 모델의 리비전별 실물 재고/재공 — product_id로 products와 조인해 customer/모델명/구분까지 함께 받아옵니다.
+  const fetchRevisionStock = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("product_revision_stock")
+      .select("*, products(customer, model_name, product_type)");
+    if (handleSupabaseError(error, "리비전별 재고 조회")) return;
+    setRevisionStockRows(data || []);
+  }, []);
+
   const fetchAll = useCallback(async () => {
     setLoading(true);
     await Promise.all([
@@ -179,6 +189,7 @@ export default function App() {
       fetchProjectFinancials(),
       fetchTradeConditions(),
       fetchExchangeRates(),
+      fetchRevisionStock(),
     ]);
     setLoading(false);
   }, [
@@ -191,6 +202,7 @@ export default function App() {
     fetchProjectFinancials,
     fetchTradeConditions,
     fetchExchangeRates,
+    fetchRevisionStock,
   ]);
 
   // 수주/출고/원자재 발주 내역을 인라인 수정·삭제한 뒤에는 해당 내역 테이블뿐 아니라
@@ -249,6 +261,10 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "project_converted_financials" }, () =>
         fetchProjectFinancials()
       )
+      .on("postgres_changes", { event: "*", schema: "public", table: "product_revision_stock" }, () => {
+        fetchRevisionStock();
+        fetchDashboard();
+      })
       .subscribe();
 
     return () => {
@@ -374,7 +390,26 @@ export default function App() {
     return result;
   }, [salesRows, shipmentRows]);
 
-  // Sample 모델의 리비전별 수주량/출고량 breakdown (대시보드 상세지표 하위 행 표시용)
+  // Sample 모델의 리비전별 수주량/출고량 + 실물 재고/재공 breakdown (대시보드 상세지표 하위 행 표시·수정용)
+  const productIdLookup = useMemo(() => {
+    const map = new Map();
+    for (const r of dashboardRows) {
+      map.set(`${r.customer}::${r.product_type}::${r.model_name}`, r.id);
+    }
+    return map;
+  }, [dashboardRows]);
+
+  const revisionStockLookup = useMemo(() => {
+    const map = new Map();
+    for (const r of revisionStockRows) {
+      const p = r.products;
+      if (!p) continue;
+      const key = `${p.customer}::${p.product_type}::${p.model_name}::${r.revision}`;
+      map.set(key, { productStock: Number(r.product_stock || 0), wipQty: Number(r.wip_qty || 0) });
+    }
+    return map;
+  }, [revisionStockRows]);
+
   const revisionBreakdownByModel = useMemo(() => {
     const map = new Map();
     const addTo = (r, field) => {
@@ -387,17 +422,33 @@ export default function App() {
     };
     salesRows.forEach((r) => addTo(r, "ordered"));
     shipmentRows.forEach((r) => addTo(r, "shipped"));
+
+    // 리비전별 실물 재고/재공 행은 있는데 수주·출고 이력이 아직 없는 리비전
+    // (예: 마이그레이션으로 생긴 "(기존 통합재고 · 재분배 필요)" 버킷)도 목록에 노출합니다.
+    for (const r of revisionStockRows) {
+      const p = r.products;
+      if (!p || p.product_type !== "sample") continue;
+      const key = `${p.customer}::${p.product_type}::${p.model_name}`;
+      if (!map.has(key)) map.set(key, new Map());
+      const revMap = map.get(key);
+      if (!revMap.has(r.revision)) revMap.set(r.revision, { ordered: 0, shipped: 0 });
+    }
+
     const result = new Map();
     for (const [key, revMap] of map) {
+      const productId = productIdLookup.get(key);
       result.set(
         key,
         Array.from(revMap.entries())
-          .map(([revision, v]) => ({ revision, ...v }))
+          .map(([revision, v]) => {
+            const stock = revisionStockLookup.get(`${key}::${revision}`) || { productStock: 0, wipQty: 0 };
+            return { revision, ...v, productId, productStock: stock.productStock, wipQty: stock.wipQty };
+          })
           .sort((a, b) => a.revision.localeCompare(b.revision, "ko"))
       );
     }
     return result;
-  }, [salesRows, shipmentRows]);
+  }, [salesRows, shipmentRows, revisionStockRows, productIdLookup, revisionStockLookup]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
