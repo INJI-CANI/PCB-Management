@@ -169,7 +169,7 @@ export function DashboardTab({ rows, summary, shipmentRows, profitRows, revision
           <ExportButton onClick={() => setExportModalOpen(true)} />
         </div>
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
-          <div className="overflow-x-auto">
+          <div className="max-h-[70vh] overflow-auto">
             <table className="w-full min-w-[900px] text-sm">
               <thead className="sticky top-0 z-10">
                 <tr className="border-b border-slate-800 bg-slate-800 text-left text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -432,6 +432,8 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
   const [editingWip, setEditingWip] = useState(false);
   const [wipInput, setWipInput] = useState(String(row.wip_qty ?? 0));
 
+  const hasRevisions = revisionBreakdown && revisionBreakdown.length > 0;
+
   useEffect(() => {
     setStockInput(String(row.material_stock ?? 0));
   }, [row.material_stock]);
@@ -454,6 +456,8 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
 
   // 제품재고 / 재공은 같은 adjust_stock RPC를 공유합니다 — 수정하지 않는 쪽은
   // 현재 값을 그대로 넘겨서, 재공 증가 시의 원자재 자동 소모 로직은 그대로 유지됩니다.
+  // ⚠️ 리비전이 있는 Sample 모델은 이 합계 행에서 직접 수정하지 않습니다 — 실물 재고/재공은
+  //    리비전별 행에서 개별로 관리하고, 이 값은 리비전별 값의 합계를 자동으로 보여주기만 합니다.
   const saveProductStock = async () => {
     const { error } = await supabase.rpc("adjust_stock", {
       p_product_id: row.id,
@@ -497,11 +501,15 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
   return (
     <>
     <tr className="hover:bg-slate-800/40">
-      <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">상세 지표</td>
+      <td className="px-4 py-3 pl-16 font-sans text-xs text-slate-500">{hasRevisions ? "합계 (리비전 전체)" : "상세 지표"}</td>
       <td className="px-4 py-3 text-right">{formatQty(row.total_order_qty)}</td>
       <td className="px-4 py-3 text-right text-emerald-400">{formatQty(row.delivered_qty)}</td>
       <td className="px-4 py-3 text-right">
-        {editingProductStock ? (
+        {hasRevisions ? (
+          <span className="font-mono text-slate-400" title="리비전별 재고 합계 — 수정은 아래 리비전별 행에서 해주세요">
+            {formatQty(row.product_stock)}
+          </span>
+        ) : editingProductStock ? (
           <div className="flex items-center justify-end gap-1">
             <input
               type="number"
@@ -532,7 +540,11 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
         )}
       </td>
       <td className="px-4 py-3 text-right text-cyan-300">
-        {editingWip ? (
+        {hasRevisions ? (
+          <span className="font-mono" title="리비전별 재공 합계 — 수정은 아래 리비전별 행에서 해주세요">
+            {formatQty(row.wip_qty)}
+          </span>
+        ) : editingWip ? (
           <div className="flex items-center justify-end gap-1">
             <input
               type="number"
@@ -587,7 +599,7 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
           <button
             onClick={() => setEditingStock(true)}
             className="inline-flex items-center gap-1 font-sans text-slate-100 hover:text-cyan-300"
-            title="원자재재고 직접 수정"
+            title="원자재재고 직접 수정 (리비전 공통 — 모델 단위로 통합 관리됩니다)"
           >
             <span className="font-mono">{formatQty(row.material_stock)}</span>
             <Pencil size={10} />
@@ -623,7 +635,7 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
           <button
             onClick={() => setEditingWaiting(true)}
             className="inline-flex items-center gap-1 font-sans hover:text-cyan-300"
-            title="대기 수량을 재고로 전환 (FIFO)"
+            title="대기 수량을 재고로 전환 (FIFO, 리비전 공통)"
           >
             <span className="font-mono">{formatQty(row.material_waiting)}</span>
             <Pencil size={10} />
@@ -631,27 +643,135 @@ function DashboardDetailRow({ row, revisionBreakdown }) {
         )}
       </td>
     </tr>
-    {revisionBreakdown && revisionBreakdown.length > 0 &&
-      revisionBreakdown.map((rev) => (
-        <tr key={rev.revision} className="bg-purple-500/[0.03] hover:bg-purple-500/[0.06]">
-          <td className="px-4 py-3 pl-16 font-sans text-xs">
-            <span className="inline-flex items-center gap-1 rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-300">
-              {rev.revision}
-            </span>
-          </td>
-          <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">{formatQty(rev.ordered)}</td>
-          <td className="px-4 py-3 text-right font-mono text-xs text-slate-600" colSpan={2}>
-            -
-          </td>
-          <td className="px-4 py-3 text-right font-mono text-xs text-emerald-400/80">{formatQty(rev.shipped)}</td>
-          <td className="px-4 py-3 text-right font-mono text-xs text-amber-400/80">
-            {formatQty(Math.max(0, rev.ordered - rev.shipped))}
-          </td>
-          <td className="px-4 py-3 text-right font-mono text-xs text-slate-600" colSpan={2}>
-            -
-          </td>
-        </tr>
-      ))}
+    {hasRevisions && revisionBreakdown.map((rev) => <RevisionDetailRow key={rev.revision} rev={rev} />)}
     </>
+  );
+}
+
+// Sample 모델의 리비전별 실물 재고/재공 행 — 원자재는 모델 단위로 통합되어 있으므로 이 행에서는
+// 다루지 않고(대시 표시), 재고/재공만 리비전 단위로 개별 수정합니다.
+function RevisionDetailRow({ rev }) {
+  const [editingStock, setEditingStock] = useState(false);
+  const [stockInput, setStockInput] = useState(String(rev.productStock ?? 0));
+  const [editingWip, setEditingWip] = useState(false);
+  const [wipInput, setWipInput] = useState(String(rev.wipQty ?? 0));
+
+  useEffect(() => {
+    setStockInput(String(rev.productStock ?? 0));
+  }, [rev.productStock]);
+  useEffect(() => {
+    setWipInput(String(rev.wipQty ?? 0));
+  }, [rev.wipQty]);
+
+  const saveStock = async () => {
+    if (!rev.productId) {
+      notifyToast("error", "제품 정보를 찾지 못해 저장할 수 없습니다. 새로고침 후 다시 시도해주세요.");
+      return;
+    }
+    const { error } = await supabase.rpc("adjust_revision_stock", {
+      p_product_id: rev.productId,
+      p_revision: rev.revision,
+      p_new_wip: Number(rev.wipQty) || 0,
+      p_new_product_stock: Number(stockInput) || 0,
+    });
+    if (handleSupabaseError(error, "리비전별 재고 수정")) return;
+    notifyToast("success", `${rev.revision} 재고가 수정되었습니다.`);
+    setEditingStock(false);
+  };
+
+  const saveWip = async () => {
+    if (!rev.productId) {
+      notifyToast("error", "제품 정보를 찾지 못해 저장할 수 없습니다. 새로고침 후 다시 시도해주세요.");
+      return;
+    }
+    const { error } = await supabase.rpc("adjust_revision_stock", {
+      p_product_id: rev.productId,
+      p_revision: rev.revision,
+      p_new_wip: Number(wipInput) || 0,
+      p_new_product_stock: Number(rev.productStock) || 0,
+    });
+    if (handleSupabaseError(error, "리비전별 재공 수정")) return;
+    notifyToast("success", `${rev.revision} 재공이 수정되었습니다 (증가분만큼 원자재재고에서 자동 차감됩니다).`);
+    setEditingWip(false);
+  };
+
+  return (
+    <tr className="bg-purple-500/[0.03] hover:bg-purple-500/[0.06]">
+      <td className="px-4 py-3 pl-16 font-sans text-xs">
+        <span className="inline-flex items-center gap-1 rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-300">
+          {rev.revision}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">{formatQty(rev.ordered)}</td>
+      <td className="px-4 py-3 text-right font-mono text-xs text-emerald-400/80">{formatQty(rev.shipped)}</td>
+      <td className="px-4 py-3 text-right font-mono text-xs">
+        {editingStock ? (
+          <div className="flex items-center justify-end gap-1">
+            <input
+              type="number"
+              min="0"
+              value={stockInput}
+              onChange={(e) => setStockInput(e.target.value)}
+              className="w-16 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+            />
+            <button onClick={saveStock} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400">
+              <Check size={10} />
+            </button>
+            <button
+              onClick={() => setEditingStock(false)}
+              className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+            >
+              <X size={10} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditingStock(true)}
+            className="inline-flex items-center gap-1 text-slate-300 hover:text-cyan-300"
+            title="이 리비전의 실물 재고 직접 수정"
+          >
+            <span className="font-mono">{formatQty(rev.productStock)}</span>
+            <Pencil size={9} />
+          </button>
+        )}
+      </td>
+      <td className="px-4 py-3 text-right font-mono text-xs text-cyan-300/90">
+        {editingWip ? (
+          <div className="flex items-center justify-end gap-1">
+            <input
+              type="number"
+              min="0"
+              value={wipInput}
+              onChange={(e) => setWipInput(e.target.value)}
+              className="w-16 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-right font-mono text-xs text-slate-100 outline-none focus:border-cyan-500"
+            />
+            <button onClick={saveWip} className="rounded bg-cyan-500 px-1 py-0.5 text-slate-950 hover:bg-cyan-400">
+              <Check size={10} />
+            </button>
+            <button
+              onClick={() => setEditingWip(false)}
+              className="rounded border border-slate-700 px-1 py-0.5 text-slate-400 hover:bg-slate-800"
+            >
+              <X size={10} />
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditingWip(true)}
+            className="inline-flex items-center gap-1 hover:text-cyan-200"
+            title="이 리비전의 재공 직접 수정 (증가분만큼 원자재재고 자동 차감)"
+          >
+            <span className="font-mono">{formatQty(rev.wipQty)}</span>
+            <Pencil size={9} />
+          </button>
+        )}
+      </td>
+      <td className="px-4 py-3 text-right font-mono text-xs text-amber-400/80">
+        {formatQty(Math.max(0, rev.ordered - rev.shipped))}
+      </td>
+      <td className="px-4 py-3 text-right font-mono text-xs text-slate-600" colSpan={2}>
+        -
+      </td>
+    </tr>
   );
 }
